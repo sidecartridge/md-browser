@@ -146,6 +146,7 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
     pico_lwip                # lwIP library
     pico_lwip_http           # lwIP httpd library
     pico_lwip_mbedtls        # lwIP mbedTLS library
+    pico_lwip_mdns          # lwIP mDNS library
     pico_mbedtls             # mbedTLS library
     pico_multicore           # Multicore support
     pico_stdlib              # Core functionality
