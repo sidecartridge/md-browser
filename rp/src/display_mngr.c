@@ -93,7 +93,7 @@ void display_mngr_wifi_change_status(uint8_t wifi_status, const char *url1,
 
   if (wifi_status == 1) {
     u8g2_SetDrawColor(display_getU8g2Ref(), 0);
-    u8g2_DrawBox(display_getU8g2Ref(), 0, DISPLAY_HEIGHT - -16, DISPLAY_WIDTH,
+    u8g2_DrawBox(display_getU8g2Ref(), 0, DISPLAY_HEIGHT - 24, DISPLAY_WIDTH,
                  8);
     u8g2_SetDrawColor(display_getU8g2Ref(), 1);
 
