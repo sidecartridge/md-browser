@@ -882,7 +882,7 @@ static const char *cgi_upload_cancel(int iIndex, int iNumParams,
     return "/json.shtml";
   }
   // Optionally delete partial file
-  char path[MNGR_HTTPD_MAX_FOLDER_LEN];
+  char path[MNGR_HTTPD_MAX_PATH_LEN];
   f_getcwd(path, sizeof(path));  // stub, adjust if needed
   // Remove file using fullpath stored? Skipped
   free_upload_ctx(ctx);
