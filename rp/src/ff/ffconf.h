@@ -23,14 +23,14 @@
 /   2: f_opendir(), f_readdir() and f_closedir() are removed in addition to 1.
 /   3: f_lseek() function is removed in addition to 2. */
 
-#define FF_USE_FIND 0
+#define FF_USE_FIND 2
 /* This option switches filtered directory read functions, f_findfirst() and
 /  f_findnext(). (0:Disable, 1:Enable 2:Enable with matching altname[] too) */
 
 #define FF_USE_MKFS 1
 /* This option switches f_mkfs() function. (0:Disable or 1:Enable) */
 
-#define FF_USE_FASTSEEK 0
+#define FF_USE_FASTSEEK 1
 /* This option switches fast seek function. (0:Disable or 1:Enable) */
 
 #define FF_USE_EXPAND 1
@@ -45,7 +45,7 @@ enable this option. */
 /* This option switches volume label functions, f_getlabel() and f_setlabel().
 /  (0:Disable or 1:Enable) */
 
-#define FF_USE_FORWARD 0
+#define FF_USE_FORWARD 1
 /* This option switches f_forward() function. (0:Disable or 1:Enable) */
 
 #define FF_USE_STRFUNC 1
