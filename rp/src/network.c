@@ -84,7 +84,7 @@ void network_deInit() {
 #endif
 
 // NOLINTBEGIN(readability-magic-numbers)
-static u_int32_t getAuthPicoCode(u_int16_t connectCode) {
+static u_int32_t getAuthPicoCode(uint16_t connectCode) {
   switch (connectCode) {
     case 0:
       return CYW43_AUTH_OPEN;
@@ -105,13 +105,98 @@ static u_int32_t getAuthPicoCode(u_int16_t connectCode) {
 }
 // NOLINTEND(readability-magic-numbers)
 
+// Function to parse and clean up an SSID string
+// If the SSID is longer than MAX_SSID_LENGTH, it is truncated.
+// If the SSID does not comply with the standard, it is cleaned up.
+// Returns true if valid, false otherwise.
+bool network_parseSSID(const char *ssid, char *outSSID) {
+  if (ssid == NULL || outSSID == NULL) {
+    return false;
+  }
+
+  // IEEE 802.11 SSID rules:
+  //  - Length: 1..32 bytes (MAX_SSID_LENGTH must be <= 33)
+  //  - May not be all spaces
+  //  - Cannot have control/non-printable chars (typically 0x20..0x7E allowed)
+
+  size_t inLen = strnlen(ssid, MAX_SSID_LENGTH * 2);  // catch crazy input
+  if (inLen == 0) {
+    outSSID[0] = '\0';
+    return false;
+  }
+
+  // Clean: Copy only allowed chars up to MAX_SSID_LENGTH-1
+  size_t outLen = 0;
+  for (size_t i = 0; i < inLen && outLen < MAX_SSID_LENGTH - 1; ++i) {
+    char c = ssid[i];
+    // Only printable ASCII (0x20-0x7E), disallow control characters
+    if ((unsigned char)c >= 0x20 && (unsigned char)c <= 0x7E) {
+      outSSID[outLen++] = c;
+    }
+  }
+  outSSID[outLen] = '\0';
+
+  // Check: Not empty, not all spaces, not all filtered out
+  if (outLen == 0) return false;
+  for (size_t i = 0; i < outLen; ++i) {
+    if (outSSID[i] != ' ') return true;
+  }
+  return false;
+}
+
+// Function to parse and clean up the password string
+// of a WiFi network complying with the IEEE 802.11 standard.
+// If the password is longer than WIFI_AP_PASS_MAX_LENGTH,
+// it is truncated.
+// Returns true if valid, false otherwise.
+bool network_parsePassword(const char *password, char *outPassword) {
+  if (password == NULL || outPassword == NULL) {
+    return false;
+  }
+
+  // IEEE 802.11 password rules:
+  //  - WPA2 minimum length: 8 chars (WEP: 5/13/16/29/etc)
+  //  - WPA2 maximum length: 63 bytes
+  //  - Only printable ASCII chars (0x20-0x7E) are valid
+  //  - Not all spaces
+
+  size_t inLen =
+      strnlen(password, WIFI_AP_PASS_MAX_LENGTH * 2);  // catch crazy input
+  if (inLen == 0) {
+    outPassword[0] = '\0';
+    return false;
+  }
+
+  // Clean: Copy only allowed chars up to WIFI_AP_PASS_MAX_LENGTH-1
+  size_t outLen = 0;
+  for (size_t i = 0; i < inLen && outLen < WIFI_AP_PASS_MAX_LENGTH - 1; ++i) {
+    char c = password[i];
+    // Only printable ASCII (0x20-0x7E)
+    if ((unsigned char)c >= 0x20 && (unsigned char)c <= 0x7E) {
+      outPassword[outLen++] = c;
+    }
+  }
+  outPassword[outLen] = '\0';
+
+  // Check: Not empty, not all spaces, not all filtered out
+  if (outLen == 0) return false;
+  for (size_t i = 0; i < outLen; ++i) {
+    if (outPassword[i] != ' ') {
+      // Ensure password length is at least 8 characters
+      if (outLen >= 8) return true;
+      return false;
+    }
+  }
+  return false;
+}
+
 // Setter for the callback function
 void network_setPollingCallback(NetworkPollingCallback callback) {
   networkPollingCallback = callback;
 }
 
 // NOLINTBEGIN(readability-magic-numbers)
-const char *network_getAuthTypeString(u_int16_t connectCode) {
+const char *network_getAuthTypeString(uint16_t connectCode) {
   switch (connectCode) {
     case 0:
       return "OPEN";
@@ -133,7 +218,7 @@ const char *network_getAuthTypeString(u_int16_t connectCode) {
 // NOLINTEND(readability-magic-numbers)
 
 // NOLINTBEGIN(readability-magic-numbers)
-const char *network_getAuthTypeStringShort(u_int16_t connectCode) {
+const char *network_getAuthTypeStringShort(uint16_t connectCode) {
   switch (connectCode) {
     case 1:
     case 2:
@@ -434,6 +519,40 @@ static void networkStatusCallback(struct netif *netif) {
   }
 }
 
+const char *network_WifiStaConnStatusString(
+    wifi_sta_conn_process_status_t status) {
+  switch (status) {
+    case NETWORK_WIFI_STA_CONN_OK:
+      return "Connection successful";
+    case NETWORK_WIFI_STA_CONN_ERR_NOT_INITIALIZED:
+      return "WiFi not initialized ";
+    case NETWORK_WIFI_STA_CONN_ERR_INVALID_MODE:
+      return "Invalid WiFi mode    ";
+    case NETWORK_WIFI_STA_CONN_ERR_MAC_FAILED:
+      return "Failed to get MAC    ";
+    case NETWORK_WIFI_STA_CONN_ERR_NO_SSID:
+      return "No SSID provided     ";
+    case NETWORK_WIFI_STA_CONN_ERR_NO_AUTH_MODE:
+      return "No auth mode provided ";
+    case NETWORK_WIFI_STA_CONN_ERR_CONNECTION_FAILED:
+      return "Failed connecting WiFi";
+    case NETWORK_WIFI_STA_CONN_ERR_TIMEOUT:
+      return "Connection timeout    ";
+    default:
+      return "Unknown error";
+  }
+}
+
+#if LWIP_MDNS_RESPONDER
+static void srv_txt(struct mdns_service *service, void *txt_userdata) {
+  err_t res;
+  LWIP_UNUSED_ARG(txt_userdata);
+
+  res = mdns_resp_add_service_txtitem(service, "path=/", 6);
+  LWIP_ERROR("mdns add service txt failed\n", (res == ERR_OK), return);
+}
+#endif
+
 wifi_sta_conn_process_status_t network_wifiStaConnect() {
   if (!cyw43Initialized) {
     DPRINTF("WiFi not initialized. Cancelling connection\n");
@@ -463,6 +582,15 @@ wifi_sta_conn_process_status_t network_wifiStaConnect() {
   }
   DPRINTF("Hostname: %s\n", wifiHostname);
   netif_set_hostname(nif, wifiHostname);
+
+#if LWIP_MDNS_RESPONDER
+  // Setup mdns
+  mdns_resp_init();
+  DPRINTF("mDNS host name %s.local\n", wifiHostname);
+  mdns_resp_add_netif(nif, wifiHostname);
+  mdns_resp_add_service(nif, "sidecart_httpd", "_http", DNSSD_PROTO_TCP, 80,
+                        srv_txt, NULL);
+#endif
 
   // Set callbacks
   netif_set_link_callback(nif, wifiLinkCallback);
@@ -614,6 +742,7 @@ wifi_sta_conn_process_status_t network_wifiStaConnect() {
   }
   if (absolute_time_diff_us(get_absolute_time(), wifiConnConnTimeout) <= 0) {
     DPRINTF("WiFi connection timeout\n");
+    // Return the error code
     return NETWORK_WIFI_STA_CONN_ERR_TIMEOUT;
   }
 

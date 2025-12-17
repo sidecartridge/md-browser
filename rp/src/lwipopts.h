@@ -38,7 +38,7 @@
 #define PBUF_POOL_SIZE 32
 #define LWIP_ARP 1
 #define LWIP_ETHERNET 1
-#define LWIP_ICMP 1
+#define LWIP_ICMP 0
 #define LWIP_RAW 0
 #define TCP_MSS 1460
 #define TCP_WND (12 * TCP_MSS)
@@ -105,6 +105,16 @@
 #define DHCP_DEBUG LWIP_DBG_OFF
 
 // Custom flags
+
+// The following is needed to test mDns
+#define LWIP_MDNS_RESPONDER 1
+#define LWIP_IGMP 1
+#define LWIP_NUM_NETIF_CLIENT_DATA 1
+#define MDNS_RESP_USENETIF_EXTCALLBACK 1
+// #define MEMP_NUM_SYS_TIMEOUT (LWIP_NUM_SYS_TIMEOUT_INTERNAL + 3)
+#define MEMP_NUM_SYS_TIMEOUT (32)
+#define MEMP_NUM_TCP_PCB 12
+
 // #define TCP_FAST_INTERVAL 50
 #define TCP_NODELAY 0
 
@@ -113,6 +123,7 @@
 #define LWIP_SOCKET \
   0  //  Not needed. Sequential API, and therefore for platforms with OSes only.
 
+#define LWIP_TIMERS 1  // Enable timers (needed for HTTPD)
 #define LWIP_HTTPD 0
 #define LWIP_HTTPD_SSI 1
 #define LWIP_HTTPD_CGI 1
@@ -136,7 +147,7 @@
 
 #define HTTPD_FSDATA_FILE "fsdata_srv.c"
 
-#if FMANAGER_DOWNLOAD_HTTPS == 1
+#if BOOSTER_DOWNLOAD_HTTPS == 1
 // If you don't want to use TLS (just a http request) you can avoid linking to
 // mbedtls and remove the following
 #define LWIP_ALTCP 1
@@ -144,8 +155,8 @@
 #define LWIP_ALTCP_TLS 1
 #define LWIP_ALTCP_TLS_MBEDTLS 1
 #define ALTCP_MBEDTLS_AUTHMODE MBEDTLS_SSL_VERIFY_NONE
-#define ALTCP_MBEDTLS_DEBUG LWIP_DBG_ON
-#define ALTCP_MBEDTLS_LIB_DEBUG LWIP_DBG_ON
+// #define ALTCP_MBEDTLS_DEBUG  LWIP_DBG_ON
+// #define ALTCP_MBEDTLS_LIB_DEBUG LWIP_DBG_ON
 #endif
 
 // Note bug in lwip with LWIP_ALTCP and LWIP_DEBUG
