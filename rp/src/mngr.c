@@ -170,25 +170,29 @@ void __not_in_flash_func(mngr_loop)() {
     uint16_t payloadSizeTmp = 4;
     if ((lastProtocol->payload_size > payloadSizeTmp) &&
         (lastProtocol->payload_size <= TERM_PARAMETERS_MAX_SIZE)) {
-      DPRINTF("Payload D3: 0x%04X\n", TPROTO_GET_PAYLOAD_PARAM32(payloadPtr));
+      DPRINTF("Payload D3: 0x%08" PRIX32 "\n",
+              (uint32_t)TPROTO_GET_PAYLOAD_PARAM32(payloadPtr));
       TPROTO_NEXT32_PAYLOAD_PTR(payloadPtr);
     }
     payloadSizeTmp += 4;
     if ((lastProtocol->payload_size > payloadSizeTmp) &&
         (lastProtocol->payload_size <= TERM_PARAMETERS_MAX_SIZE)) {
-      DPRINTF("Payload D4: 0x%04X\n", TPROTO_GET_PAYLOAD_PARAM32(payloadPtr));
+      DPRINTF("Payload D4: 0x%08" PRIX32 "\n",
+              (uint32_t)TPROTO_GET_PAYLOAD_PARAM32(payloadPtr));
       TPROTO_NEXT32_PAYLOAD_PTR(payloadPtr);
     }
     payloadSizeTmp += 4;
     if ((lastProtocol->payload_size > payloadSizeTmp) &&
         (lastProtocol->payload_size <= TERM_PARAMETERS_MAX_SIZE)) {
-      DPRINTF("Payload D5: 0x%04X\n", TPROTO_GET_PAYLOAD_PARAM32(payloadPtr));
+      DPRINTF("Payload D5: 0x%08" PRIX32 "\n",
+              (uint32_t)TPROTO_GET_PAYLOAD_PARAM32(payloadPtr));
       TPROTO_NEXT32_PAYLOAD_PTR(payloadPtr);
     }
     payloadSizeTmp += 4;
     if ((lastProtocol->payload_size > payloadSizeTmp) &&
         (lastProtocol->payload_size <= TERM_PARAMETERS_MAX_SIZE)) {
-      DPRINTF("Payload D6: 0x%04X\n", TPROTO_GET_PAYLOAD_PARAM32(payloadPtr));
+      DPRINTF("Payload D6: 0x%08" PRIX32 "\n",
+              (uint32_t)TPROTO_GET_PAYLOAD_PARAM32(payloadPtr));
       TPROTO_NEXT32_PAYLOAD_PTR(payloadPtr);
     }
 #endif
@@ -380,6 +384,9 @@ int mngr_init() {
     }
 
     switch (download_getStatus()) {
+      case DOWNLOAD_STATUS_IDLE:
+        // Nothing to do.
+        break;
       case DOWNLOAD_STATUS_STARTED:
       case DOWNLOAD_STATUS_IN_PROGRESS: {
         download_poll();
@@ -413,6 +420,15 @@ int mngr_init() {
         DPRINTF("Download completed successfully.\n");
         break;
       }
+      case DOWNLOAD_STATUS_FAILED:
+        // Keep FAILED so the UI can react (e.g. redirect to error page). A new
+        // download request can still transition status back to REQUESTED.
+        break;
+      default:
+        DPRINTF("Unexpected download status=%d; resetting to IDLE\n",
+                (int)download_getStatus());
+        download_setStatus(DOWNLOAD_STATUS_IDLE);
+        break;
     }
   }
 
