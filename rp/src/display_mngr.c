@@ -42,7 +42,7 @@ void draw_connection_scr(const uint8_t qrcode_url[], const char *ssid,
 
   // Connection info
   u8g2_DrawStr(display_getU8g2Ref(),
-               LEFT_PADDING_FOR_CENTER(ssid_str, DISPLAY_TILES_WIDTH) * 8, 48,
+               LEFT_PADDING_FOR_CENTER(ssid_str, DISPLAY_TILES_WIDTH) * 8, 40,
                ssid_str);
 
   // Wifi status
@@ -102,7 +102,7 @@ void display_mngr_wifi_change_status(uint8_t wifi_status, const char *url1,
     snprintf(url_str, sizeof(url_str), "%s or %s", url1, url2);
     u8g2_SetFont(display_getU8g2Ref(), u8g2_font_squeezed_b7_tr);
     u8g2_DrawStr(display_getU8g2Ref(),
-                 LEFT_PADDING_FOR_CENTER(DISPLAY_BYPASS_MESSAGE, 68) * 5, 38,
+                 LEFT_PADDING_FOR_CENTER(DISPLAY_BYPASS_MESSAGE, 68) * 5, 30,
                  url_str);
   }
   if (wifi_status == 2) {
@@ -111,7 +111,7 @@ void display_mngr_wifi_change_status(uint8_t wifi_status, const char *url1,
     u8g2_DrawStr(
         display_getU8g2Ref(),
         LEFT_PADDING_FOR_CENTER(DISPLAY_MNGR_SELECT_RESET_MESSAGE, 68) * 5,
-        DISPLAY_HEIGHT - 17, DISPLAY_MNGR_SELECT_RESET_MESSAGE);
+        DISPLAY_HEIGHT - 9, DISPLAY_MNGR_SELECT_RESET_MESSAGE);
   } else {
     // Clear the error message
     // u8g2_DrawStr(display_getU8g2Ref(),

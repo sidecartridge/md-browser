@@ -28,6 +28,7 @@
 #include "network.h"
 #include "pico/async_context.h"
 #include "pico/multicore.h"
+#include "pico/rand.h"
 #include "pico/stdlib.h"
 #include "reset.h"
 #include "romemul.h"

@@ -137,7 +137,7 @@ int main() {
   // The code is stored as an array in the target_firmware.h file
   //
   // Copy the terminal firmware to RAM
-  COPY_FIRMWARE_TO_RAM((uint16_t *)target_firmware, target_firmware_length);
+  COPY_FIRMWARE_TO_RAM((uint16_t *)target_firmware, target_firmware_length * 2);
 
   // Initialize the terminal emulator PIO programs
   // The communication between the remote (target) computer and the RP2040

@@ -14,7 +14,11 @@
 #define MBEDTLS_SSL_OUT_CONTENT_LEN 4096
 
 #define MBEDTLS_ALLOW_PRIVATE_ACCESS
-#define MBEDTLS_HAVE_TIME
+// RP2040 builds generally don't have a usable time-of-day implementation; avoid
+// enabling mbedTLS time features that require clock_gettime()/time().
+// (TLS auth is configured elsewhere; if you enable certificate validation,
+// revisit this and provide a proper time source.)
+// #define MBEDTLS_HAVE_TIME
 
 // Symmetric ciphers
 #define MBEDTLS_CIPHER_MODE_CBC       // Cipher block chaining
@@ -68,7 +72,7 @@
 #define MBEDTLS_SSL_EXTENDED_MASTER_SECRET  // TLS extension (RFC 7627)
 #define MBEDTLS_SSL_MAX_FRAGMENT_LENGTH     // TLS extension (RFC 6066)
 #define MBEDTLS_SSL_SERVER_NAME_INDICATION  // TLS extension (RFC 6066)
-#define MBEDTLS_SSL_TRUNCATED_HMAC          // TLS extension (RFC 6066)
+// MBEDTLS_SSL_TRUNCATED_HMAC was removed in Mbed TLS 3.0
 
 // Protocols
 #define MBEDTLS_SSL_PROTO_TLS1_2  // Enable TLS version 1.2

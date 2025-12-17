@@ -40,7 +40,7 @@
         search: '',
         labels: [],       // unique labels for combo box
         selectedLabel: '', // filter by this label
-        showNew: false,    // only show newest entries when checked
+        showNew: true,    // only show newest entries when checked
         // returns entries matching the search query
         filteredEntries() {
           const q = this.search.toLowerCase();
@@ -171,6 +171,10 @@
         </li>
         <li class="pure-menu-item">
           <a href="/fmanager_home.shtml" class="pure-menu-link">File Manager</a>
+        </li>
+        <li class="pure-menu-item">
+          <a href="https://docs.sidecartridge.com/sidecartridge-multidevice/publicfloppydb/#how-to-contribute"
+            target="_blank" class="pure-menu-link">Contribute</a>
         </li>
         <li class="pure-menu-item">
           <a href="https://docs.sidecartridge.com/sidecartridge-multidevice/microfirmwares/browser/" target="_blank"

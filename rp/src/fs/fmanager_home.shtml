@@ -132,10 +132,10 @@
           const file = entry.file;
           const token = Math.random().toString(36).substr(2, 9);
           entry.token = token;
-          const fullpath = this.folder.replace(/\/$/, '') + '/' + file.name;
           // Start upload
           let res = await fetch(`/upload_start.cgi?token=${encodeURIComponent(token)}` +
-            `&fullpath=${encodeURIComponent(fullpath)}`);
+            `&folder=${encodeURIComponent(this.folder)}` +
+            `&src=${encodeURIComponent(file.name)}`);
           let result = await res.json();
           // record preferred upload method
           this.uploadMethod = result.method || 'GET';
@@ -263,10 +263,10 @@
           this.downloadProgress = 0;
           this.downloadName = this.detailFile.n;
           const token = Math.random().toString(36).substr(2, 9);
-          const path = this.folder.replace(/\/$/, '') + '/' + this.detailFile.n;
           // Start download
           let res = await fetch(`/download_start.cgi?token=${encodeURIComponent(token)}` +
-            `&fullpath=${encodeURIComponent(path)}`);
+            `&folder=${encodeURIComponent(this.folder)}` +
+            `&src=${encodeURIComponent(this.detailFile.n)}`);
           let info = await res.json();
           if (info.error) { alert('Download start failed: ' + info.error); this.downloading = false; return; }
           const chunkSize = info.chunkSize || 1024;
@@ -447,6 +447,10 @@
         </li>
         <li class="pure-menu-item pure-menu-selected">
           <a href="#" class="pure-menu-link">File Manager</a>
+        </li>
+        <li class="pure-menu-item">
+          <a href="https://docs.sidecartridge.com/sidecartridge-multidevice/publicfloppydb/#how-to-contribute"
+            target="_blank" class="pure-menu-link">Contribute</a>
         </li>
         <li class="pure-menu-item">
           <a href="https://docs.sidecartridge.com/sidecartridge-multidevice/microfirmwares/browser/" target="_blank"
