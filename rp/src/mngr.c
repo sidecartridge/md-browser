@@ -257,6 +257,8 @@ int mngr_init() {
   const char *hostname =
       (hostname_entry && hostname_entry->value) ? hostname_entry->value : NULL;
   char url_host[128] = {0};
+  // Use a .local mDNS-qualified hostname so the device can be discovered on the
+  // local network via mDNS/Bonjour (e.g. "http://<hostname>.local").
   if ((hostname != NULL) && (strlen(hostname) > 0)) {
     snprintf(url_host, sizeof(url_host), "http://%s.local", hostname);
   } else {
