@@ -11,8 +11,24 @@
 static bool startBooster =
     false;  // Flag to indicate if the booster should start
 
-static TransmissionProtocol lastProtocol;
-static bool lastProtocolValid = false;
+// Single-producer (ISR) / single-consumer (main loop) ring buffer for parsed
+// protocol commands. This avoids races on a single shared struct/flag.
+#ifndef PROTOCOL_RING_SIZE
+#define PROTOCOL_RING_SIZE 4
+#endif
+
+#if (PROTOCOL_RING_SIZE < 2)
+#error "PROTOCOL_RING_SIZE must be >= 2"
+#endif
+
+#if ((PROTOCOL_RING_SIZE & (PROTOCOL_RING_SIZE - 1)) != 0)
+#error "PROTOCOL_RING_SIZE must be a power of two"
+#endif
+
+static TransmissionProtocol protocolRing[PROTOCOL_RING_SIZE];
+static volatile uint8_t protocolRingHead = 0;  // next write index (ISR)
+static volatile uint8_t protocolRingTail = 0;  // next read index (main loop)
+static volatile uint32_t protocolRingDropped = 0;
 
 static uint32_t memorySharedAddress = 0;
 static uint32_t memoryRandomTokenAddress = 0;
@@ -31,12 +47,20 @@ static uint32_t memoryRandomTokenSeedAddress = 0;
  */
 static inline void __not_in_flash_func(handle_protocol_command)(
     const TransmissionProtocol *protocol) {
-  // Copy the content of protocol to last_protocol
+  // Push the parsed protocol into the ring. If full, drop the newest command.
+  uint8_t head = protocolRingHead;
+  uint8_t next = (uint8_t)((head + 1u) & (PROTOCOL_RING_SIZE - 1u));
+  if (next == protocolRingTail) {
+    protocolRingDropped++;
+    return;
+  }
+
+  TransmissionProtocol *dst = &protocolRing[head];
   // Copy the 8-byte header directly
-  lastProtocol.command_id = protocol->command_id;
-  lastProtocol.payload_size = protocol->payload_size;
-  lastProtocol.bytes_read = protocol->bytes_read;
-  lastProtocol.final_checksum = protocol->final_checksum;
+  dst->command_id = protocol->command_id;
+  dst->payload_size = protocol->payload_size;
+  dst->bytes_read = protocol->bytes_read;
+  dst->final_checksum = protocol->final_checksum;
 
   // Sanity check: clamp payload_size to avoid overflow
   uint16_t size = protocol->payload_size;
@@ -45,9 +69,11 @@ static inline void __not_in_flash_func(handle_protocol_command)(
   }
 
   // Copy only used payload bytes
-  memcpy(lastProtocol.payload, protocol->payload, size);
+  memcpy(dst->payload, protocol->payload, size);
 
-  lastProtocolValid = true;
+  // Ensure payload/header writes are visible before advancing head.
+  __compiler_memory_barrier();
+  protocolRingHead = next;
 };
 
 static inline void __not_in_flash_func(handle_protocol_checksum_error)(
@@ -97,17 +123,33 @@ void mngr_preinit() {
 // Invoke this function to process the commands from the active loop in the
 // main function
 void __not_in_flash_func(mngr_loop)() {
-  if (lastProtocolValid) {
+  // Report dropped commands (ring overflow) from ISR context without printing
+  // inside the IRQ handler.
+#if defined(_DEBUG) && (_DEBUG != 0)
+  static uint32_t lastDroppedReported = 0;
+  uint32_t dropped = protocolRingDropped;
+  if (dropped != lastDroppedReported) {
+    DPRINTF("Protocol ring overflow: dropped=%lu (+%lu)\n",
+            (unsigned long)dropped,
+            (unsigned long)(dropped - lastDroppedReported));
+    lastDroppedReported = dropped;
+  }
+#endif
+
+  // Process all pending commands in the ring buffer.
+  while (protocolRingTail != protocolRingHead) {
+    const TransmissionProtocol *lastProtocol = &protocolRing[protocolRingTail];
+
     // Shared by all commands
     // Read the random token from the command and increment the payload
     // pointer to the first parameter available in the payload
-    uint32_t randomToken = TPROTO_GET_RANDOM_TOKEN(lastProtocol.payload);
-    uint16_t *payloadPtr = ((uint16_t *)(lastProtocol).payload);
-    uint16_t commandId = lastProtocol.command_id;
+    uint32_t randomToken = TPROTO_GET_RANDOM_TOKEN(lastProtocol->payload);
+    uint16_t *payloadPtr = ((uint16_t *)(lastProtocol)->payload);
+    uint16_t commandId = lastProtocol->command_id;
     DPRINTF(
         "Command ID: %d. Size: %d. Random token: 0x%08X, Checksum: 0x%04X\n",
-        lastProtocol.command_id, lastProtocol.payload_size, randomToken,
-        lastProtocol.final_checksum);
+        lastProtocol->command_id, lastProtocol->payload_size, randomToken,
+        lastProtocol->final_checksum);
 
 #if defined(_DEBUG) && (_DEBUG != 0)
     // Jump the random token
@@ -115,33 +157,33 @@ void __not_in_flash_func(mngr_loop)() {
 
     // Read the payload parameters
     uint16_t payloadSizeTmp = 4;
-    if ((lastProtocol.payload_size > payloadSizeTmp) &&
-        (lastProtocol.payload_size <= TERM_PARAMETERS_MAX_SIZE)) {
+    if ((lastProtocol->payload_size > payloadSizeTmp) &&
+        (lastProtocol->payload_size <= TERM_PARAMETERS_MAX_SIZE)) {
       DPRINTF("Payload D3: 0x%04X\n", TPROTO_GET_PAYLOAD_PARAM32(payloadPtr));
       TPROTO_NEXT32_PAYLOAD_PTR(payloadPtr);
     }
     payloadSizeTmp += 4;
-    if ((lastProtocol.payload_size > payloadSizeTmp) &&
-        (lastProtocol.payload_size <= TERM_PARAMETERS_MAX_SIZE)) {
+    if ((lastProtocol->payload_size > payloadSizeTmp) &&
+        (lastProtocol->payload_size <= TERM_PARAMETERS_MAX_SIZE)) {
       DPRINTF("Payload D4: 0x%04X\n", TPROTO_GET_PAYLOAD_PARAM32(payloadPtr));
       TPROTO_NEXT32_PAYLOAD_PTR(payloadPtr);
     }
     payloadSizeTmp += 4;
-    if ((lastProtocol.payload_size > payloadSizeTmp) &&
-        (lastProtocol.payload_size <= TERM_PARAMETERS_MAX_SIZE)) {
+    if ((lastProtocol->payload_size > payloadSizeTmp) &&
+        (lastProtocol->payload_size <= TERM_PARAMETERS_MAX_SIZE)) {
       DPRINTF("Payload D5: 0x%04X\n", TPROTO_GET_PAYLOAD_PARAM32(payloadPtr));
       TPROTO_NEXT32_PAYLOAD_PTR(payloadPtr);
     }
     payloadSizeTmp += 4;
-    if ((lastProtocol.payload_size > payloadSizeTmp) &&
-        (lastProtocol.payload_size <= TERM_PARAMETERS_MAX_SIZE)) {
+    if ((lastProtocol->payload_size > payloadSizeTmp) &&
+        (lastProtocol->payload_size <= TERM_PARAMETERS_MAX_SIZE)) {
       DPRINTF("Payload D6: 0x%04X\n", TPROTO_GET_PAYLOAD_PARAM32(payloadPtr));
       TPROTO_NEXT32_PAYLOAD_PTR(payloadPtr);
     }
 #endif
 
     // Handle the command
-    switch (lastProtocol.command_id) {
+    switch (lastProtocol->command_id) {
       case APP_BOOSTER_START: {
         SEND_COMMAND_TO_DISPLAY(DISPLAY_COMMAND_BOOSTER);
         startBooster = true;  // Set the flag to start the booster
@@ -163,8 +205,12 @@ void __not_in_flash_func(mngr_loop)() {
     } else {
       DPRINTF("Memory random token address is not set.\n");
     }
+
+    // Pop this command from the ring.
+    __compiler_memory_barrier();
+    protocolRingTail =
+        (uint8_t)((protocolRingTail + 1u) & (PROTOCOL_RING_SIZE - 1u));
   }
-  lastProtocolValid = false;
 }
 
 int mngr_init() {
@@ -196,9 +242,9 @@ int mngr_init() {
       settings_find_entry(gconfig_getContext(), PARAM_HOSTNAME)->value;
   char url_host[128] = {0};
   if ((hostname != NULL) && (strlen(hostname) > 0)) {
-    snprintf(url_host, sizeof(url_host), "http://%s", hostname);
+    snprintf(url_host, sizeof(url_host), "http://%s.local", hostname);
   } else {
-    snprintf(url_host, sizeof(url_host), "http://%s", "sidecart");
+    snprintf(url_host, sizeof(url_host), "http://%s.local", "sidecart");
   }
 
   char url_ip[128] = {0};
