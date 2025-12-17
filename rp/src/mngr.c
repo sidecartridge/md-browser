@@ -238,8 +238,10 @@ int mngr_init() {
   network_deInit();
 
   // Set hostname
-  char *hostname =
-      settings_find_entry(gconfig_getContext(), PARAM_HOSTNAME)->value;
+  SettingsConfigEntry *hostname_entry =
+      settings_find_entry(gconfig_getContext(), PARAM_HOSTNAME);
+  const char *hostname =
+      (hostname_entry && hostname_entry->value) ? hostname_entry->value : NULL;
   char url_host[128] = {0};
   if ((hostname != NULL) && (strlen(hostname) > 0)) {
     snprintf(url_host, sizeof(url_host), "http://%s.local", hostname);
@@ -254,7 +256,7 @@ int mngr_init() {
   char ssid[128] = {0};
   SettingsConfigEntry *ssid_param =
       settings_find_entry(gconfig_getContext(), PARAM_WIFI_SSID);
-  if (strlen(ssid_param->value) == 0) {
+  if (!ssid_param || !ssid_param->value || (strlen(ssid_param->value) == 0)) {
     DPRINTF("No SSID found in config.\n");
     snprintf(ssid, sizeof(ssid), "%s", "No SSID found");
   } else {
