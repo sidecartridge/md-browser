@@ -139,6 +139,18 @@ void __not_in_flash_func(mngr_loop)() {
   while (protocolRingTail != protocolRingHead) {
     const TransmissionProtocol *lastProtocol = &protocolRing[protocolRingTail];
 
+    // Validate minimum payload size before decoding mandatory fields.
+    // The random token occupies 4 bytes at the start of the payload.
+    if (lastProtocol->payload_size < 4) {
+      DPRINTF("Invalid protocol payload_size=%u for command_id=%u (need >= 4)\n",
+              lastProtocol->payload_size, lastProtocol->command_id);
+      // Drop malformed command and continue.
+      __compiler_memory_barrier();
+      protocolRingTail =
+          (uint8_t)((protocolRingTail + 1u) & (PROTOCOL_RING_SIZE - 1u));
+      continue;
+    }
+
     // Shared by all commands
     // Read the random token from the command and increment the payload
     // pointer to the first parameter available in the payload
@@ -320,8 +332,9 @@ int mngr_init() {
   // Start the HTTP server
   mngr_httpd_start(sdcard_err);
 
-  absolute_time_t start_download_time =
-      make_timeout_time_ms(86400 * 1000);  // 3 seconds to start the download
+  // Initialize far in the future so downloads don't start until a REQUESTED
+  // status sets a short timeout.
+  absolute_time_t start_download_time = make_timeout_time_ms(86400 * 1000);
 
   bool usbInitialized = false;  // USB not initialized yet
   while (!startBooster) {
