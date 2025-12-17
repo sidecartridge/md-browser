@@ -113,10 +113,9 @@ void mngr_preinit() {
   SET_SHARED_VAR(TERM_HARDWARE_VERSION, 0, memorySharedAddress,
                  TERM_SHARED_VARIABLES_OFFSET);  // Clean the hardware version
 
-  // Initialize the random seed (add this line)
-  srand(time(NULL));
-  // Init the random token seed in the shared memory for the next command
-  uint32_t newRandomSeedToken = rand();  // Generate a new random 32-bit value
+  // Init the random token seed in the shared memory for the next command.
+  // Avoid time(NULL) here: on bare-metal it is often unset (or always 0).
+  uint32_t newRandomSeedToken = get_rand_32();
   TPROTO_SET_RANDOM_TOKEN(memoryRandomTokenSeedAddress, newRandomSeedToken);
 }
 
@@ -199,8 +198,7 @@ void __not_in_flash_func(mngr_loop)() {
       TPROTO_SET_RANDOM_TOKEN(memoryRandomTokenAddress, randomToken);
 
       // Init the random token seed in the shared memory for the next command
-      uint32_t newRandomSeedToken =
-          rand();  // Generate a new random 32-bit value
+      uint32_t newRandomSeedToken = get_rand_32();
       TPROTO_SET_RANDOM_TOKEN(memoryRandomTokenSeedAddress, newRandomSeedToken);
     } else {
       DPRINTF("Memory random token address is not set.\n");
