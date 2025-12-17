@@ -449,6 +449,10 @@
           <a href="#" class="pure-menu-link">File Manager</a>
         </li>
         <li class="pure-menu-item">
+          <a href="https://docs.sidecartridge.com/sidecartridge-multidevice/publicfloppydb/#how-to-contribute"
+            target="_blank" class="pure-menu-link">Contribute</a>
+        </li>
+        <li class="pure-menu-item">
           <a href="https://docs.sidecartridge.com/sidecartridge-multidevice/microfirmwares/browser/" target="_blank"
             class="pure-menu-link">Help</a>
         </li>
