@@ -7,41 +7,17 @@
  */
 
 #include "mngr_httpd.h"
-
-#include "network.h"
-
-#include "lwip/apps/fs.h"
-
-#include <ctype.h>
-#include <stdarg.h>
-
-// Add includes for download and settings
-#include "download.h"
-#include "include/aconfig.h"
-#include "settings/settings.h"
-
-#define MAX_JSON_PAYLOAD_SIZE 4096
 static mngr_httpd_response_status_t response_status = MNGR_HTTPD_RESPONSE_OK;
 static char json_buff[MAX_JSON_PAYLOAD_SIZE] = {0};  // Buffer for JSON payload
-static char httpd_response_message[128] = {0};
+static char httpd_response_message[MNGR_HTTPD_RESPONSE_MSG_LEN] = {0};
 static int sdcard_status = SDCARD_INIT_ERROR;
-
-#define MNGR_HTTPD_ALLOWED_ROOT "/"
 
 // Per-connection/per-file state for lwIP httpd when serving /json.shtml.
 // This avoids races where the global json buffer is overwritten while SSI
 // multipart output is still in progress on another connection.
 #if defined(LWIP_HTTPD_FILE_STATE) && LWIP_HTTPD_FILE_STATE
-typedef struct {
-  bool in_use;
-  char json_snapshot[MAX_JSON_PAYLOAD_SIZE];
-} httpd_json_state_t;
-
-#ifndef HTTPD_JSON_STATE_SLOTS
-#define HTTPD_JSON_STATE_SLOTS 4
-#endif
-
 static httpd_json_state_t httpd_json_states[HTTPD_JSON_STATE_SLOTS] = {0};
+
 
 void *fs_state_init(struct fs_file *file, const char *name) {
   LWIP_UNUSED_ARG(file);
@@ -94,20 +70,34 @@ static bool normalize_and_validate_path(const char *in, char *out,
                                         size_t out_len) {
   if (!in || !out || out_len < 2) return false;
 
+  char *tmp = NULL;
+  bool ok = false;
+
+  // Support in-place normalization safely
+  // (normalize_and_validate_path(out,out)). join_root_folder_name() uses
+  // in-place normalization today.
+  if (in == out) {
+    tmp = malloc(out_len);
+    if (!tmp) goto cleanup;
+    size_t in_len = strnlen(in, out_len);
+    if (in_len >= out_len) goto cleanup;
+    memcpy(tmp, in, in_len + 1);
+    in = tmp;
+  }
+
   // Treat empty as root.
   if (*in == '\0') {
     out[0] = '/';
     out[1] = '\0';
-    return true;
+    ok = true;
+    goto cleanup;
   }
 
   size_t o = 0;
   const char *p = in;
 
   // Force absolute.
-  if (*p != '/') {
-    out[o++] = '/';
-  }
+  if (*p != '/') out[o++] = '/';
 
   bool prev_was_slash = (o > 0);
   const char *seg_start = NULL;
@@ -117,12 +107,12 @@ static bool normalize_and_validate_path(const char *in, char *out,
     char ch = *p++;
     if (ch == '/') {
       if (seg_start) {
-        if (segment_is_forbidden(seg_start, seg_len)) return false;
+        if (segment_is_forbidden(seg_start, seg_len)) goto cleanup;
         seg_start = NULL;
         seg_len = 0;
       }
       if (!prev_was_slash) {
-        if (o + 1 >= out_len) return false;
+        if (o + 1 >= out_len) goto cleanup;
         out[o++] = '/';
         prev_was_slash = true;
       }
@@ -134,28 +124,32 @@ static bool normalize_and_validate_path(const char *in, char *out,
       seg_len = 0;
     }
     seg_len++;
-    if (path_has_forbidden_chars(&ch, 1)) return false;
+    if (path_has_forbidden_chars(&ch, 1)) goto cleanup;
 
-    if (o + 1 >= out_len) return false;
+    if (o + 1 >= out_len) goto cleanup;
     out[o++] = ch;
     prev_was_slash = false;
   }
 
   if (seg_start) {
-    if (segment_is_forbidden(seg_start, seg_len)) return false;
+    if (segment_is_forbidden(seg_start, seg_len)) goto cleanup;
   }
 
   // Trim trailing slash unless root.
   if (o > 1 && out[o - 1] == '/') o--;
-  if (o >= out_len) return false;
+  if (o >= out_len) goto cleanup;
   out[o] = '\0';
 
   // Ensure allowed root prefix.
   if (strncmp(out, MNGR_HTTPD_ALLOWED_ROOT, strlen(MNGR_HTTPD_ALLOWED_ROOT)) !=
       0) {
-    return false;
+    goto cleanup;
   }
-  return true;
+  ok = true;
+
+cleanup:
+  free(tmp);
+  return ok;
 }
 
 static bool validate_filename_only(const char *name) {
@@ -175,23 +169,11 @@ static bool join_root_folder_name(const char *folder_abs, const char *name,
   size_t flen = strlen(folder_abs);
   if (flen == 0) return false;
   bool need_slash = folder_abs[flen - 1] != '/';
-  int n = snprintf(out, out_len, "%s%s%s", folder_abs, need_slash ? "/" : "",
-                   name);
+  int n =
+      snprintf(out, out_len, "%s%s%s", folder_abs, need_slash ? "/" : "", name);
   if (n < 0 || (size_t)n >= out_len) return false;
   return normalize_and_validate_path(out, out, out_len);
 }
-
-#define UPLOAD_CHUNK_SIZE 4096
-// Default upload chunk method: "GET" (base64) or "POST" (binary)
-#ifndef UPLOAD_CHUNK_METHOD
-#define UPLOAD_CHUNK_METHOD "POST"
-#endif
-
-// Default download chunk size (raw bytes) to fit JSON buffer after base64
-// (~4KB)
-#ifndef DOWNLOAD_CHUNK_SIZE
-#define DOWNLOAD_CHUNK_SIZE 2048
-#endif
 
 // Decodes a URI-escaped string (percent-encoded) into its original value.
 // E.g., "My%20SSID%21" -> "My SSID!"
@@ -231,8 +213,7 @@ static bool json_appendf(char *buf, size_t buf_size, size_t *buf_len,
   if (!buf || !buf_len || *buf_len >= buf_size) return false;
   va_list args;
   va_start(args, fmt);
-  int written =
-      vsnprintf(buf + *buf_len, buf_size - *buf_len, fmt, args);
+  int written = vsnprintf(buf + *buf_len, buf_size - *buf_len, fmt, args);
   va_end(args);
   if (written < 0) return false;
   if ((size_t)written >= buf_size - *buf_len) {
@@ -336,14 +317,14 @@ static const char *cgi_folder(int iIndex, int iNumParams, char *pcParam[],
   DPRINTF("FOLDER CGI handler called with index %d\n", iIndex);
   /* Parse 'folder' query parameter */
   const char *req_folder = NULL;
-  char decoded_folder[256] = {0};
-  char folder_abs[256] = {0};
+  char decoded_folder[MNGR_HTTPD_MAX_FOLDER_LEN] = {0};
+  char folder_abs[MNGR_HTTPD_MAX_FOLDER_LEN] = {0};
   for (int i = 0; i < iNumParams; i++) {
     if (strcmp(pcParam[i], "folder") == 0) {
       req_folder = pcValue[i];
       if (!url_decode(req_folder, decoded_folder, sizeof(decoded_folder)) ||
           !normalize_and_validate_path(decoded_folder, folder_abs,
-                                      sizeof(folder_abs))) {
+                                       sizeof(folder_abs))) {
         DPRINTF("Invalid folder parameter: %s\n", req_folder);
         /* Return empty JSON array */
         strcpy(json_buff, "[]");
@@ -417,7 +398,10 @@ static const char *cgi_folder(int iIndex, int iNumParams, char *pcParam[],
 static const char *cgi_mkdir(int iIndex, int iNumParams, char *pcParam[],
                              char *pcValue[]) {
   const char *folder = NULL, *src = NULL;
-  char df[256] = {0}, ds[128] = {0}, folder_abs[256] = {0}, path[512] = {0};
+  char df[MNGR_HTTPD_MAX_FOLDER_LEN] = {0};
+  char ds[MNGR_HTTPD_MAX_NAME_LEN] = {0};
+  char folder_abs[MNGR_HTTPD_MAX_FOLDER_LEN] = {0};
+  char *path = NULL;
   for (int i = 0; i < iNumParams; i++) {
     if (!strcmp(pcParam[i], "folder")) folder = pcValue[i];
     if (!strcmp(pcParam[i], "src")) src = pcValue[i];
@@ -426,13 +410,20 @@ static const char *cgi_mkdir(int iIndex, int iNumParams, char *pcParam[],
     strcpy(json_buff, "{\"error\":\"missing parameters\"}");
     return "/json.shtml";
   }
+  path = calloc(1, MNGR_HTTPD_MAX_PATH_LEN);
+  if (!path) {
+    strcpy(json_buff, "{\"error\":\"out of memory\"}");
+    return "/json.shtml";
+  }
   if (!url_decode(folder, df, sizeof(df)) || !url_decode(src, ds, sizeof(ds)) ||
       !normalize_and_validate_path(df, folder_abs, sizeof(folder_abs)) ||
-      !join_root_folder_name(folder_abs, ds, path, sizeof(path))) {
+      !join_root_folder_name(folder_abs, ds, path, MNGR_HTTPD_MAX_PATH_LEN)) {
     strcpy(json_buff, "{\"error\":\"invalid encoding\"}");
+    free(path);
     return "/json.shtml";
   }
   FRESULT r = f_mkdir(path);
+  free(path);
   if (r != FR_OK)
     snprintf(json_buff, sizeof(json_buff), "{\"error\":\"mkdir failed %d\"}",
              r);
@@ -448,17 +439,17 @@ const char *cgi_download(int iIndex, int iNumParams, char *pcParam[],
                          char *pcValue[]) {
   DPRINTF("cgi_download called with index %d\n", iIndex);
 
-  char decoded_folder[256] = {0};
-  char folder_abs[256] = {0};
+  char decoded_folder[MNGR_HTTPD_MAX_FOLDER_LEN] = {0};
+  char folder_abs[MNGR_HTTPD_MAX_FOLDER_LEN] = {0};
   char decoded_url[DOWNLOAD_BUFFLINE_SIZE] = {0};
   bool has_folder = false, has_url = false;
   for (int i = 0; i < iNumParams; i++) {
     if (strcmp(pcParam[i], "folder") == 0) {
       if (!url_decode(pcValue[i], decoded_folder, sizeof(decoded_folder)) ||
           !normalize_and_validate_path(decoded_folder, folder_abs,
-                                      sizeof(folder_abs))) {
+                                       sizeof(folder_abs))) {
         DPRINTF("Invalid folder parameter: %s\n", pcValue[i]);
-        static char error_url[128];
+        static char error_url[MNGR_HTTPD_ERROR_URL_LEN];
         snprintf(error_url, sizeof(error_url),
                  "/error.shtml?error=%d&error_msg=Invalid%%20folder",
                  MNGR_HTTPD_RESPONSE_BAD_REQUEST);
@@ -468,7 +459,7 @@ const char *cgi_download(int iIndex, int iNumParams, char *pcParam[],
     } else if (strcmp(pcParam[i], "url") == 0) {
       if (!url_decode(pcValue[i], decoded_url, sizeof(decoded_url))) {
         DPRINTF("Invalid URL parameter: %s\n", pcValue[i]);
-        static char error_url[128];
+        static char error_url[MNGR_HTTPD_ERROR_URL_LEN];
         snprintf(error_url, sizeof(error_url),
                  "/error.shtml?error=%d&error_msg=Invalid%%20url",
                  MNGR_HTTPD_RESPONSE_BAD_REQUEST);
@@ -479,7 +470,7 @@ const char *cgi_download(int iIndex, int iNumParams, char *pcParam[],
   }
   if (!has_folder || !has_url) {
     DPRINTF("Missing folder or URL parameter\n");
-    static char error_url[128];
+    static char error_url[MNGR_HTTPD_ERROR_URL_LEN];
     snprintf(error_url, sizeof(error_url),
              "/error.shtml?error=%d&error_msg=Bad%%20request",
              MNGR_HTTPD_RESPONSE_BAD_REQUEST);
@@ -508,14 +499,14 @@ static const char *cgi_ls(int iIndex, int iNumParams, char *pcParam[],
   DPRINTF("LS CGI handler called with index %d\n", iIndex);
   /* Parse 'folder' query parameter */
   const char *req_folder = NULL;
-  char decoded_folder[256] = {0};
-  char folder_abs[256] = {0};
+  char decoded_folder[MNGR_HTTPD_MAX_FOLDER_LEN] = {0};
+  char folder_abs[MNGR_HTTPD_MAX_FOLDER_LEN] = {0};
   for (int i = 0; i < iNumParams; i++) {
     if (strcmp(pcParam[i], "folder") == 0) {
       req_folder = pcValue[i];
       if (!url_decode(req_folder, decoded_folder, sizeof(decoded_folder)) ||
           !normalize_and_validate_path(decoded_folder, folder_abs,
-                                      sizeof(folder_abs))) {
+                                       sizeof(folder_abs))) {
         DPRINTF("Invalid folder parameter: %s\n", req_folder);
         /* Return empty JSON array */
         strcpy(json_buff, "[]");
@@ -614,7 +605,7 @@ static const char *cgi_ls(int iIndex, int iNumParams, char *pcParam[],
 // Upload context for resumable uploads
 #define MAX_UPLOAD_CONTEXTS 4
 typedef struct {
-  char token[32];
+  char token[MNGR_HTTPD_MAX_TOKEN_LEN];
   FIL file;
   bool in_use;
   bool file_open;
@@ -696,7 +687,7 @@ static post_chunk_state_t *alloc_post_chunk_state(void *connection,
 // Download context for chunked downloads
 #define MAX_DOWNLOAD_CONTEXTS 4
 typedef struct {
-  char token[32];
+  char token[MNGR_HTTPD_MAX_TOKEN_LEN];
   FIL file;
   bool in_use;
   bool file_open;
@@ -755,10 +746,10 @@ static void free_upload_ctx(upload_ctx_t *ctx) {
 static const char *cgi_upload_start(int iIndex, int iNumParams, char *pcParam[],
                                     char *pcValue[]) {
   const char *token = NULL, *folder = NULL, *src = NULL;
-  char decoded_folder[256] = {0};
-  char decoded_src[128] = {0};
-  char folder_abs[256] = {0};
-  char decoded_path[256] = {0};
+  char decoded_folder[MNGR_HTTPD_MAX_FOLDER_LEN] = {0};
+  char decoded_src[MNGR_HTTPD_MAX_NAME_LEN] = {0};
+  char folder_abs[MNGR_HTTPD_MAX_FOLDER_LEN] = {0};
+  char decoded_path[MNGR_HTTPD_MAX_PATH_LEN] = {0};
   for (int i = 0; i < iNumParams; i++) {
     if (strcmp(pcParam[i], "token") == 0) token = pcValue[i];
     if (strcmp(pcParam[i], "folder") == 0) folder = pcValue[i];
@@ -771,7 +762,7 @@ static const char *cgi_upload_start(int iIndex, int iNumParams, char *pcParam[],
   if (!url_decode(folder, decoded_folder, sizeof(decoded_folder)) ||
       !url_decode(src, decoded_src, sizeof(decoded_src)) ||
       !normalize_and_validate_path(decoded_folder, folder_abs,
-                                  sizeof(folder_abs)) ||
+                                   sizeof(folder_abs)) ||
       !join_root_folder_name(folder_abs, decoded_src, decoded_path,
                              sizeof(decoded_path))) {
     strcpy(json_buff, "{\"error\":\"invalid path parameters\"}");
@@ -837,8 +828,8 @@ static const char *cgi_upload_chunk(int iIndex, int iNumParams, char *pcParam[],
       return "/json.shtml";
     }
     if (mbedtls_base64_decode(buffer, outCap, &decodedLen,
-                              (const unsigned char *)decodedPayload, inLen) !=
-        0) {
+                              (const unsigned char *)decodedPayload,
+                              inLen) != 0) {
       free(buffer);
       free(decodedPayload);
       strcpy(json_buff, "{\"error\":\"invalid base64\"}");
@@ -891,7 +882,7 @@ static const char *cgi_upload_cancel(int iIndex, int iNumParams,
     return "/json.shtml";
   }
   // Optionally delete partial file
-  char path[256];
+  char path[MNGR_HTTPD_MAX_FOLDER_LEN];
   f_getcwd(path, sizeof(path));  // stub, adjust if needed
   // Remove file using fullpath stored? Skipped
   free_upload_ctx(ctx);
@@ -903,10 +894,10 @@ static const char *cgi_upload_cancel(int iIndex, int iNumParams,
 static const char *cgi_download_start(int iIndex, int iNumParams,
                                       char *pcParam[], char *pcValue[]) {
   const char *token = NULL, *folder = NULL, *src = NULL;
-  char decoded_folder[256] = {0};
-  char decoded_src[128] = {0};
-  char folder_abs[256] = {0};
-  char decoded_path[256] = {0};
+  char decoded_folder[MNGR_HTTPD_MAX_FOLDER_LEN] = {0};
+  char decoded_src[MNGR_HTTPD_MAX_NAME_LEN] = {0};
+  char folder_abs[MNGR_HTTPD_MAX_FOLDER_LEN] = {0};
+  char decoded_path[MNGR_HTTPD_MAX_PATH_LEN] = {0};
   for (int i = 0; i < iNumParams; i++) {
     if (strcmp(pcParam[i], "token") == 0) token = pcValue[i];
     if (strcmp(pcParam[i], "folder") == 0) folder = pcValue[i];
@@ -919,7 +910,7 @@ static const char *cgi_download_start(int iIndex, int iNumParams,
   if (!url_decode(folder, decoded_folder, sizeof(decoded_folder)) ||
       !url_decode(src, decoded_src, sizeof(decoded_src)) ||
       !normalize_and_validate_path(decoded_folder, folder_abs,
-                                  sizeof(folder_abs)) ||
+                                   sizeof(folder_abs)) ||
       !join_root_folder_name(folder_abs, decoded_src, decoded_path,
                              sizeof(decoded_path))) {
     strcpy(json_buff, "{\"error\":\"invalid path parameters\"}");
@@ -948,6 +939,8 @@ static const char *cgi_download_start(int iIndex, int iNumParams,
 static const char *cgi_download_chunk(int iIndex, int iNumParams,
                                       char *pcParam[], char *pcValue[]) {
   const char *token = NULL, *chunkStr = NULL;
+  unsigned char *rawbuf = NULL;
+  unsigned char *b64buf = NULL;
   for (int i = 0; i < iNumParams; i++) {
     if (strcmp(pcParam[i], "token") == 0) token = pcValue[i];
     if (strcmp(pcParam[i], "chunk") == 0) chunkStr = pcValue[i];
@@ -960,24 +953,31 @@ static const char *cgi_download_chunk(int iIndex, int iNumParams,
   int chunk = atoi(chunkStr);
   DWORD offset = (DWORD)chunk * DOWNLOAD_CHUNK_SIZE;
   f_lseek(&ctx->file, offset);
-  unsigned char rawbuf[DOWNLOAD_CHUNK_SIZE];
+  rawbuf = malloc(DOWNLOAD_CHUNK_SIZE);
+  b64buf = malloc(MAX_JSON_PAYLOAD_SIZE);
+  if (!rawbuf || !b64buf) {
+    strcpy(json_buff, "{\"error\":\"out of memory\"}");
+    goto cleanup;
+  }
   UINT readBytes = 0;
   FRESULT res = f_read(&ctx->file, rawbuf, DOWNLOAD_CHUNK_SIZE, &readBytes);
   if (res != FR_OK) {
     strcpy(json_buff, "{\"error\":\"read failed\"}");
-    return "/json.shtml";
+    goto cleanup;
   }
-  unsigned char b64buf[MAX_JSON_PAYLOAD_SIZE];
   size_t olen = 0;
-  if (mbedtls_base64_encode(b64buf, sizeof(b64buf), &olen, rawbuf, readBytes) !=
-      0) {
+  if (mbedtls_base64_encode(b64buf, MAX_JSON_PAYLOAD_SIZE, &olen, rawbuf,
+                            readBytes) != 0) {
     strcpy(json_buff, "{\"error\":\"base64 encode failed\"}");
-    return "/json.shtml";
+    goto cleanup;
   }
   // JSON response with base64 data
   snprintf(json_buff, sizeof(json_buff),
            "{\"status\":\"chunk\",\"length\":%u,\"data\":\"%.*s\"}",
            (unsigned)readBytes, (int)olen, b64buf);
+cleanup:
+  free(b64buf);
+  free(rawbuf);
   return "/json.shtml";
 }
 
@@ -1016,37 +1016,71 @@ static const char *cgi_download_cancel(int iIndex, int iNumParams,
 // CGI: rename file
 static const char *cgi_ren(int iIndex, int iNumParams, char *pcParam[],
                            char *pcValue[]) {
+  DPRINTF("REN CGI handler called with index %d, numParams %d\n", iIndex,
+          iNumParams);
   const char *folder = NULL, *src = NULL, *dst = NULL;
-  char df[256] = {0}, ds[128] = {0}, dd[128] = {0};
-  char folder_abs[256] = {0};
+  char *df = NULL, *ds = NULL, *dd = NULL, *folder_abs = NULL;
+  char *from = NULL, *to = NULL;
   for (int i = 0; i < iNumParams; i++) {
     if (!strcmp(pcParam[i], "folder")) folder = pcValue[i];
     if (!strcmp(pcParam[i], "src")) src = pcValue[i];
     if (!strcmp(pcParam[i], "dst")) dst = pcValue[i];
   }
+  DPRINTF("cgi_ren params: folder='%s' src='%s' dst='%s'\n",
+          folder ? folder : "(null)", src ? src : "(null)",
+          dst ? dst : "(null)");
+
+  const char *ret = "/json.shtml";
   if (!folder || !src || !dst) {
     strcpy(json_buff, "{\"error\":\"missing parameters\"}");
-    return "/json.shtml";
+    return ret;
   }
-  if (!url_decode(folder, df, sizeof(df)) || !url_decode(src, ds, sizeof(ds)) ||
-      !url_decode(dst, dd, sizeof(dd)) ||
-      !normalize_and_validate_path(df, folder_abs, sizeof(folder_abs))) {
+
+  df = calloc(1, MNGR_HTTPD_MAX_FOLDER_LEN);
+  ds = calloc(1, MNGR_HTTPD_MAX_NAME_LEN);
+  dd = calloc(1, MNGR_HTTPD_MAX_NAME_LEN);
+  folder_abs = calloc(1, MNGR_HTTPD_MAX_FOLDER_LEN);
+  from = calloc(1, MNGR_HTTPD_MAX_PATH_LEN);
+  to = calloc(1, MNGR_HTTPD_MAX_PATH_LEN);
+  if (!df || !ds || !dd || !folder_abs || !from || !to) {
+    strcpy(json_buff, "{\"error\":\"out of memory\"}");
+    goto cleanup;
+  }
+
+  if (!url_decode(folder, df, MNGR_HTTPD_MAX_FOLDER_LEN) ||
+      !url_decode(src, ds, MNGR_HTTPD_MAX_NAME_LEN) ||
+      !url_decode(dst, dd, MNGR_HTTPD_MAX_NAME_LEN) ||
+      !normalize_and_validate_path(df, folder_abs, MNGR_HTTPD_MAX_FOLDER_LEN)) {
+    DPRINTF("cgi_ren decode/validate failed: df='%s' ds='%s' dd='%s'\n", df, ds,
+            dd);
     strcpy(json_buff, "{\"error\":\"invalid encoding\"}");
-    return "/json.shtml";
+    goto cleanup;
   }
-  char from[512], to[512];
-  if (!join_root_folder_name(folder_abs, ds, from, sizeof(from)) ||
-      !join_root_folder_name(folder_abs, dd, to, sizeof(to))) {
+  DPRINTF("cgi_ren decoded: folder_abs='%s' src='%s' dst='%s'\n", folder_abs,
+          ds, dd);
+  if (!join_root_folder_name(folder_abs, ds, from, MNGR_HTTPD_MAX_PATH_LEN) ||
+      !join_root_folder_name(folder_abs, dd, to, MNGR_HTTPD_MAX_PATH_LEN)) {
+    DPRINTF("cgi_ren join path failed: from='%s' to='%s'\n", from, to);
     strcpy(json_buff, "{\"error\":\"invalid path\"}");
-    return "/json.shtml";
+    goto cleanup;
   }
+  DPRINTF("cgi_ren renaming: '%s' -> '%s'\n", from, to);
   FRESULT r = f_rename(from, to);
+  DPRINTF("cgi_ren f_rename result: %d\n", (int)r);
   if (r != FR_OK)
     snprintf(json_buff, sizeof(json_buff), "{\"error\":\"rename failed %d\"}",
              r);
   else
     strcpy(json_buff, "{\"status\":\"renamed\"}");
-  return "/json.shtml";
+
+cleanup:
+  free(to);
+  free(from);
+  free(folder_abs);
+  free(dd);
+  free(ds);
+  free(df);
+  return ret;
 }
 
 // CGI: delete file
@@ -1075,8 +1109,10 @@ static FRESULT delete_path(const char *path) {
 static const char *cgi_del(int iIndex, int iNumParams, char *pcParam[],
                            char *pcValue[]) {
   const char *folder = NULL, *src = NULL;
-  char df[256] = {0}, ds[128] = {0};
-  char folder_abs[256] = {0};
+  char df[MNGR_HTTPD_MAX_FOLDER_LEN] = {0};
+  char ds[MNGR_HTTPD_MAX_NAME_LEN] = {0};
+  char folder_abs[MNGR_HTTPD_MAX_FOLDER_LEN] = {0};
+  char *path = NULL;
   for (int i = 0; i < iNumParams; i++) {
     if (!strcmp(pcParam[i], "folder")) folder = pcValue[i];
     if (!strcmp(pcParam[i], "src")) src = pcValue[i];
@@ -1090,12 +1126,18 @@ static const char *cgi_del(int iIndex, int iNumParams, char *pcParam[],
     strcpy(json_buff, "{\"error\":\"invalid encoding\"}");
     return "/json.shtml";
   }
-  char path[512];
-  if (!join_root_folder_name(folder_abs, ds, path, sizeof(path))) {
+  path = calloc(1, MNGR_HTTPD_MAX_PATH_LEN);
+  if (!path) {
+    strcpy(json_buff, "{\"error\":\"out of memory\"}");
+    return "/json.shtml";
+  }
+  if (!join_root_folder_name(folder_abs, ds, path, MNGR_HTTPD_MAX_PATH_LEN)) {
     strcpy(json_buff, "{\"error\":\"invalid path\"}");
+    free(path);
     return "/json.shtml";
   }
   FRESULT r = delete_path(path);
+  free(path);
   if (r == FR_DENIED) {
     snprintf(json_buff, sizeof(json_buff),
              "{\"error\":\"directory not empty\"}");
@@ -1111,8 +1153,10 @@ static const char *cgi_del(int iIndex, int iNumParams, char *pcParam[],
 static const char *cgi_attr(int iIndex, int iNumParams, char *pcParam[],
                             char *pcValue[]) {
   const char *folder = NULL, *src = NULL, *hidden_s = NULL, *readonly_s = NULL;
-  char df[256] = {0}, ds[128] = {0}, path[512];
-  char folder_abs[256] = {0};
+  char df[MNGR_HTTPD_MAX_FOLDER_LEN] = {0};
+  char ds[MNGR_HTTPD_MAX_NAME_LEN] = {0};
+  char *path = NULL;
+  char folder_abs[MNGR_HTTPD_MAX_FOLDER_LEN] = {0};
   for (int i = 0; i < iNumParams; i++) {
     if (!strcmp(pcParam[i], "folder")) folder = pcValue[i];
     if (!strcmp(pcParam[i], "src")) src = pcValue[i];
@@ -1123,10 +1167,16 @@ static const char *cgi_attr(int iIndex, int iNumParams, char *pcParam[],
     strcpy(json_buff, "{\"error\":\"missing parameters\"}");
     return "/json.shtml";
   }
+  path = calloc(1, MNGR_HTTPD_MAX_PATH_LEN);
+  if (!path) {
+    strcpy(json_buff, "{\"error\":\"out of memory\"}");
+    return "/json.shtml";
+  }
   if (!url_decode(folder, df, sizeof(df)) || !url_decode(src, ds, sizeof(ds)) ||
       !normalize_and_validate_path(df, folder_abs, sizeof(folder_abs)) ||
-      !join_root_folder_name(folder_abs, ds, path, sizeof(path))) {
+      !join_root_folder_name(folder_abs, ds, path, MNGR_HTTPD_MAX_PATH_LEN)) {
     strcpy(json_buff, "{\"error\":\"invalid encoding\"}");
+    free(path);
     return "/json.shtml";
   }
   int hide = atoi(hidden_s);
@@ -1137,6 +1187,7 @@ static const char *cgi_attr(int iIndex, int iNumParams, char *pcParam[],
   if (hide) attr |= AM_HID;
   // Apply only hidden and read-only bits
   FRESULT r = f_chmod(path, attr, AM_RDO | AM_HID);
+  free(path);
   if (r != FR_OK)
     snprintf(json_buff, sizeof(json_buff), "{\"error\":\"chmod failed %d\"}",
              r);
@@ -1228,7 +1279,7 @@ err_t httpd_post_begin(void *connection, const char *uri,
   LWIP_UNUSED_ARG(response_uri_len);
   DPRINTF("POST request for URI: %s\n", uri);
   // Handle binary chunk upload via POST
-  if (strncmp(uri, "/upload_chunk.cgi", 17) == 0) {
+  if (strncmp(uri, "/upload_chunk.cgi", sizeof("/upload_chunk.cgi") - 1) == 0) {
     // parse token and chunk index from querystring
     const char *qs = strchr(uri, '?');
     if (qs) {
@@ -1236,8 +1287,8 @@ err_t httpd_post_begin(void *connection, const char *uri,
       const char *t = strstr(qs, "token=");
       upload_ctx_t *ctx = NULL;
       if (t) {
-        t += 6;  // skip 'token='
-        char buf[32];
+        t += sizeof("token=") - 1;  // skip 'token='
+        char buf[MNGR_HTTPD_MAX_TOKEN_LEN];
         int i = 0;
         while (*t && *t != '&' && i < (int)sizeof(buf) - 1) buf[i++] = *t++;
         buf[i] = '\0';
@@ -1246,7 +1297,7 @@ err_t httpd_post_begin(void *connection, const char *uri,
       // find chunk
       int chunk = 0;
       const char *c = strstr(qs, "chunk=");
-      if (c) chunk = atoi(c + 6);
+      if (c) chunk = atoi(c + (sizeof("chunk=") - 1));
       if (ctx) {
         // seek to correct offset
         FRESULT fr = f_lseek(&ctx->file, (DWORD)(chunk * UPLOAD_CHUNK_SIZE));
@@ -1362,13 +1413,13 @@ static u16_t ssi_handler(int iIndex, char *pcInsert, int iInsertLen
     case 7: /* JSONPLD */
     {
       // DPRINTF("SSI JSONPLD handler called with index %d\n", iIndex);
-      int chunk_size = 128;
+      int chunk_size = MNGR_HTTPD_SSI_JSON_CHUNK_SIZE;
       /* The offset into json based on current tag part */
       size_t offset = current_tag_part * chunk_size;
 #if defined(LWIP_HTTPD_FILE_STATE) && LWIP_HTTPD_FILE_STATE
-      const char *json_src =
-          (json_state && json_state->in_use) ? json_state->json_snapshot
-                                             : json_buff;
+      const char *json_src = (json_state && json_state->in_use)
+                                 ? json_state->json_snapshot
+                                 : json_buff;
 #else
       const char *json_src = json_buff;
 #endif
