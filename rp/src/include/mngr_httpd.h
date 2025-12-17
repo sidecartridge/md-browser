@@ -61,7 +61,13 @@
 #endif
 
 #ifndef HTTPD_JSON_STATE_SLOTS
+#if defined(FMANAGER_DOWNLOAD_HTTPS) && (FMANAGER_DOWNLOAD_HTTPS == 1)
+// TLS increases RAM usage; keep per-file JSON snapshot slots minimal by default
+// when HTTPS is enabled.
+#define HTTPD_JSON_STATE_SLOTS 1
+#else
 #define HTTPD_JSON_STATE_SLOTS 4
+#endif
 #endif
 
 #ifndef UPLOAD_CHUNK_SIZE
