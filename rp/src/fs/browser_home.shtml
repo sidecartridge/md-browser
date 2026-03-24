@@ -41,6 +41,11 @@
         labels: [],       // unique labels for combo box
         selectedLabel: '', // filter by this label
         showNew: true,    // only show newest entries when checked
+        returningToBooster: false,
+        boosterConfirmVisible: false,
+        bannerVisible: false,
+        bannerType: 'info',
+        bannerMessage: '',
         // returns entries matching the search query
         filteredEntries() {
           const q = this.search.toLowerCase();
@@ -148,6 +153,48 @@
         closeBrowser() {
           this.folderBrowserOpen = false;
           this.folderList = [];
+        },
+        showBanner(message, type = 'info') {
+          this.bannerMessage = message;
+          this.bannerType = type;
+          this.bannerVisible = true;
+        },
+        closeBanner() {
+          this.bannerVisible = false;
+          this.bannerMessage = '';
+        },
+        openBoosterConfirm() {
+          if (this.returningToBooster) return;
+          this.boosterConfirmVisible = true;
+        },
+        closeBoosterConfirm() {
+          if (this.returningToBooster) return;
+          this.boosterConfirmVisible = false;
+        },
+        bannerIconClass() {
+          switch (this.bannerType) {
+            case 'success': return 'fas fa-check-circle banner-icon';
+            case 'warning': return 'fas fa-exclamation-triangle banner-icon';
+            case 'error': return 'fas fa-exclamation-circle banner-icon';
+            default: return 'fas fa-info-circle banner-icon';
+          }
+        },
+        async returnToBooster() {
+          if (this.returningToBooster) return;
+          this.boosterConfirmVisible = false;
+          this.returningToBooster = true;
+          this.showBanner('Returning to Booster...', 'info');
+          try {
+            const res = await fetch('/booster.cgi');
+            const result = await res.json();
+            if (result.error) {
+              this.returningToBooster = false;
+              this.showBanner('Return to Booster failed: ' + result.error, 'error');
+            }
+          } catch (_) {
+            // Ignore network failures here; the device may already be switching
+            // to Booster mode.
+          }
         }
       };
     }
@@ -180,6 +227,11 @@
           <a href="https://docs.sidecartridge.com/sidecartridge-multidevice/microfirmwares/browser/" target="_blank"
             class="pure-menu-link">Help</a>
         </li>
+        <li class="pure-menu-item">
+          <a href="#" class="pure-menu-link booster-menu-link" :class="{'is-disabled': returningToBooster}"
+            @click.prevent="openBoosterConfirm()"
+            x-text="returningToBooster ? 'Returning…' : 'Return to Booster'"></a>
+        </li>
       </ul>
     </div>
   </nav>
@@ -187,6 +239,16 @@
   <!-- Main Content Area -->
   <main class="main-content">
     <h2>Floppy Image database</h2>
+    <div x-show="bannerVisible" class="banner" :class="{
+      'banner-success': bannerType === 'success',
+      'banner-error': bannerType === 'error',
+      'banner-warning': bannerType === 'warning',
+      'banner-info': bannerType === 'info'
+    }">
+      <i :class="bannerIconClass()"></i>
+      <span x-text="bannerMessage"></span>
+      <button class="banner-close" aria-label="Close" @click="closeBanner()">&times;</button>
+    </div>
     <p>
       Please type the name of the application you want to find in the database. The database will be filtered to show
       only the applications that match your search.
@@ -252,6 +314,19 @@
     </div>
 
   </main>
+  <div x-show="boosterConfirmVisible" x-cloak class="modal">
+    <div class="modal-overlay" @click="closeBoosterConfirm()"></div>
+    <div class="modal-content booster-confirm-modal">
+      <h3>Return to Booster</h3>
+      <p>This will leave the browser and return the device to Booster mode.</p>
+      <p>Continue?</p>
+      <div class="modal-buttons">
+        <button type="button" class="pure-button" @click="closeBoosterConfirm()">Cancel</button>
+        <button type="button" class="pure-button pure-button-warning" :disabled="returningToBooster"
+          @click="returnToBooster()" x-text="returningToBooster ? 'Returning…' : 'Return to Booster'"></button>
+      </div>
+    </div>
+  </div>
   <!-- Folder Browser Modal -->
   <div x-show="folderBrowserOpen" x-cloak class="modal">
     <div class="modal-overlay" @click="closeBrowser()"></div>

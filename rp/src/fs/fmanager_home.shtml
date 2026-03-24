@@ -36,6 +36,17 @@
         downloadProgress: 0,
         // Name of file being downloaded
         downloadName: '',
+        // Blank disk creator state
+        diskMenuVisible: false,
+        creatingDisk: false,
+        newDiskType: '720KB',
+        newDiskLabel: '',
+        newDiskFileName: '',
+        returningToBooster: false,
+        boosterConfirmVisible: false,
+        bannerVisible: false,
+        bannerType: 'info',
+        bannerMessage: '',
         load(offset = 0) {
           const url = `/ls.cgi?folder=${encodeURIComponent(this.folder)}` + (offset ? `&nextItem=${offset}` : '');
           fetch(url)
@@ -310,6 +321,148 @@
               else this.load(0);
             });
         },
+        openCreateDiskMenu() {
+          this.newDiskType = this.newDiskType || '720KB';
+          this.newDiskLabel = this.sanitizeDiskLabel(this.newDiskLabel || '');
+          this.newDiskFileName = this.sanitizeDiskFileName(this.newDiskFileName || '');
+          this.diskMenuVisible = true;
+        },
+        resetCreateDiskForm() {
+          this.newDiskType = '720KB';
+          this.newDiskLabel = '';
+          this.newDiskFileName = '';
+          this.creatingDisk = false;
+        },
+        closeCreateDiskMenu() {
+          this.diskMenuVisible = false;
+          this.resetCreateDiskForm();
+        },
+        showBanner(message, type = 'info') {
+          this.bannerMessage = message;
+          this.bannerType = type;
+          this.bannerVisible = true;
+        },
+        closeBanner() {
+          this.bannerVisible = false;
+          this.bannerMessage = '';
+        },
+        openBoosterConfirm() {
+          if (this.returningToBooster) return;
+          this.boosterConfirmVisible = true;
+        },
+        closeBoosterConfirm() {
+          if (this.returningToBooster) return;
+          this.boosterConfirmVisible = false;
+        },
+        bannerIconClass() {
+          switch (this.bannerType) {
+            case 'success': return 'fas fa-check-circle banner-icon';
+            case 'warning': return 'fas fa-exclamation-triangle banner-icon';
+            case 'error': return 'fas fa-exclamation-circle banner-icon';
+            default: return 'fas fa-info-circle banner-icon';
+          }
+        },
+        async returnToBooster() {
+          if (this.returningToBooster) return;
+          this.boosterConfirmVisible = false;
+          this.returningToBooster = true;
+          this.showBanner('Returning to Booster...', 'info');
+          try {
+            const res = await fetch('/booster.cgi');
+            const result = await res.json();
+            if (result.error) {
+              this.returningToBooster = false;
+              this.showBanner('Return to Booster failed: ' + result.error, 'error');
+            }
+          } catch (_) {
+            // Ignore network failures here; the device may already be switching
+            // to Booster mode.
+          }
+        },
+        sanitizeDiskLabel(value) {
+          let base = '';
+          let ext = '';
+          let dotSeen = false;
+          for (const ch of String(value || '').toUpperCase()) {
+            const isAlphaNum = (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9');
+            const isSafePunct = ch === '_' || ch === '-';
+            if (isAlphaNum || isSafePunct) {
+              if (!dotSeen) {
+                if (base.length < 8) base += ch;
+              } else if (ext.length < 3) {
+                ext += ch;
+              }
+              continue;
+            }
+            if (ch === '.' && !dotSeen && base.length > 0) {
+              dotSeen = true;
+            }
+          }
+          return `${base}${dotSeen ? '.' : ''}${ext}`;
+        },
+        sanitizeDiskFileName(value) {
+          let out = String(value || '').replace(/[\/\\:\x00-\x1F]/g, '').trim();
+          if (/\.st$/i.test(out)) out = out.slice(0, -3);
+          if (out.length > 96) out = out.slice(0, 96);
+          while (out.endsWith(' ') || out.endsWith('.')) {
+            out = out.slice(0, -1);
+          }
+          return out;
+        },
+        volumeLabelValid() {
+          const label = this.sanitizeDiskLabel(this.newDiskLabel);
+          return label === '' || /^[A-Z0-9_-]{1,8}\.[A-Z0-9_-]{1,3}$/.test(label);
+        },
+        fileNameValid() {
+          const name = this.sanitizeDiskFileName(this.newDiskFileName);
+          return name.length > 0 && !name.includes('..');
+        },
+        diskTypeGeometry(type) {
+          switch (type) {
+            case '360KB': return '40 tracks · 2 sides · 9 sectors';
+            case '720KB': return '80 tracks · 2 sides · 9 sectors';
+            case '1.44MB': return '80 tracks · 2 sides · 18 sectors';
+            case '2.88MB': return '80 tracks · 2 sides · 36 sectors';
+            default: return '';
+          }
+        },
+        diskFilePreview() {
+          const name = this.sanitizeDiskFileName(this.newDiskFileName);
+          return name ? `${name}.ST` : 'Enter file name';
+        },
+        async createBlankDisk() {
+          if (this.creatingDisk) return;
+          this.newDiskLabel = this.sanitizeDiskLabel(this.newDiskLabel);
+          this.newDiskFileName = this.sanitizeDiskFileName(this.newDiskFileName);
+          if (!this.fileNameValid()) {
+            this.showBanner('Enter a valid file name. Long names are allowed, but it cannot be empty or contain invalid path characters.', 'error');
+            return;
+          }
+          if (!this.volumeLabelValid()) {
+            this.showBanner('Volume name must be empty or use 8.3 format like DISK.001.', 'error');
+            return;
+          }
+          this.creatingDisk = true;
+          try {
+            const res = await fetch(`/mkst.cgi?folder=${encodeURIComponent(this.folder)}` +
+              `&type=${encodeURIComponent(this.newDiskType)}` +
+              `&name=${encodeURIComponent(this.newDiskFileName)}` +
+              `&label=${encodeURIComponent(this.newDiskLabel)}`);
+            const result = await res.json();
+            if (result.error) {
+              this.showBanner('Create blank disk failed: ' + result.error, 'error');
+              return;
+            }
+            this.diskMenuVisible = false;
+            this.resetCreateDiskForm();
+            this.load(0);
+            this.showBanner(result.file ? `Created ${result.file}` : 'Blank disk created.', 'success');
+          } catch (_) {
+            this.showBanner('Create blank disk failed', 'error');
+          } finally {
+            this.creatingDisk = false;
+          }
+        },
         // Toggle hidden attribute while preserving read-only flag
         toggleHidden() {
           const current = this.detailFile.a;
@@ -423,6 +576,62 @@
       </div>
     </div>
   </div>
+  <!-- Blank disk creator modal -->
+  <div x-show="diskMenuVisible" class="detail-modal" x-cloak @click.self="closeCreateDiskMenu()">
+    <div class="detail-modal-content disk-modal-content">
+      <h3>Create Blank .ST</h3>
+      <div class="disk-size-grid">
+        <button type="button" class="disk-size-option" :class="{active: newDiskType === '360KB'}" @click="newDiskType = '360KB'">
+          <strong>360KB (DS)</strong>
+          <span>40 tracks · 2 sides · 9 sectors</span>
+        </button>
+        <button type="button" class="disk-size-option" :class="{active: newDiskType === '720KB'}" @click="newDiskType = '720KB'">
+          <strong>720KB (DD)</strong>
+          <span>80 tracks · 2 sides · 9 sectors</span>
+        </button>
+        <button type="button" class="disk-size-option" :class="{active: newDiskType === '1.44MB'}" @click="newDiskType = '1.44MB'">
+          <strong>1.44MB (HD)</strong>
+          <span>80 tracks · 2 sides · 18 sectors</span>
+        </button>
+        <button type="button" class="disk-size-option" :class="{active: newDiskType === '2.88MB'}" @click="newDiskType = '2.88MB'">
+          <strong>2.88MB (ED)</strong>
+          <span>80 tracks · 2 sides · 36 sectors</span>
+        </button>
+      </div>
+      <label for="diskLabelInput" class="disk-field-label">Volume name</label>
+      <input id="diskLabelInput" class="disk-label-input" type="text" maxlength="12" placeholder="DISK.001"
+        x-model="newDiskLabel" @input="newDiskLabel = sanitizeDiskLabel(newDiskLabel)" />
+      <p class="disk-field-help">Optional. Old FAT-style 8.3 uppercase with a dot, for example <code>DISK.001</code>.</p>
+      <label for="diskFileNameInput" class="disk-field-label">File name</label>
+      <div class="disk-file-input-group">
+        <input id="diskFileNameInput" class="disk-label-input disk-file-input" type="text" maxlength="96" placeholder="My Blank Disk"
+          x-model="newDiskFileName" @input="newDiskFileName = sanitizeDiskFileName(newDiskFileName)" />
+        <span class="disk-fixed-ext">.ST</span>
+      </div>
+      <p class="disk-field-help">Required. Long file names are allowed. The extension is always <code>.ST</code>.</p>
+      <div class="disk-preview-row">
+        <span>Geometry</span>
+        <strong x-text="diskTypeGeometry(newDiskType)"></strong>
+      </div>
+      <div class="disk-preview-row">
+        <span>Path</span>
+        <code x-text="folder || '/'"></code>
+      </div>
+      <div class="disk-preview-row">
+        <span>Volume</span>
+        <code x-text="newDiskLabel || 'None'"></code>
+      </div>
+      <div class="disk-preview-row">
+        <span>File</span>
+        <code x-text="diskFilePreview()"></code>
+      </div>
+      <div class="disk-modal-actions">
+        <button class="pure-button" @click="closeCreateDiskMenu()">Cancel</button>
+        <button class="pure-button pure-button-primary" :disabled="creatingDisk || !fileNameValid() || !volumeLabelValid()" @click="createBlankDisk()"
+          x-text="creatingDisk ? 'Creating…' : 'Create .ST'"></button>
+      </div>
+    </div>
+  </div>
   <!-- Download progress modal -->
   <div x-show="downloading" class="download-modal" x-cloak>
     <div class="download-modal-content">
@@ -456,6 +665,11 @@
           <a href="https://docs.sidecartridge.com/sidecartridge-multidevice/microfirmwares/browser/" target="_blank"
             class="pure-menu-link">Help</a>
         </li>
+        <li class="pure-menu-item">
+          <a href="#" class="pure-menu-link booster-menu-link" :class="{'is-disabled': returningToBooster}"
+            @click.prevent="openBoosterConfirm()"
+            x-text="returningToBooster ? 'Returning…' : 'Return to Booster'"></a>
+        </li>
       </ul>
     </div>
   </nav>
@@ -463,6 +677,16 @@
   <!-- Main Content Area -->
   <main class="main-content">
     <h2>File Manager</h2>
+    <div x-show="bannerVisible" class="banner" :class="{
+      'banner-success': bannerType === 'success',
+      'banner-error': bannerType === 'error',
+      'banner-warning': bannerType === 'warning',
+      'banner-info': bannerType === 'info'
+    }">
+      <i :class="bannerIconClass()"></i>
+      <span x-text="bannerMessage"></span>
+      <button class="banner-close" aria-label="Close" @click="closeBanner()">&times;</button>
+    </div>
     <!-- Breadcrumb and navigation -->
     <p>Folder: <strong x-text="folder || '/' "></strong></p>
     <div style="margin:1rem 0; display:flex; gap:0.5rem;">
@@ -470,6 +694,7 @@
       <button class="pure-button pure-button-primary" @click="$refs.fileInput.click()">Upload Files</button>
       <button class="pure-button" @click="uploadUrl()">Upload from URL</button>
       <button class="pure-button" @click="createFolder()">New Folder</button>
+      <button class="pure-button" @click="openCreateDiskMenu()">Blank .ST</button>
     </div>
 
     <table class="pure-table pure-table-horizontal" style="margin-top:1rem; width:100%;">
@@ -513,6 +738,19 @@
     </table>
 
   </main>
+  <div x-show="boosterConfirmVisible" x-cloak class="modal">
+    <div class="modal-overlay" @click="closeBoosterConfirm()"></div>
+    <div class="modal-content booster-confirm-modal">
+      <h3>Return to Booster</h3>
+      <p>This will leave the file manager and return the device to Booster mode.</p>
+      <p>Continue?</p>
+      <div class="modal-buttons">
+        <button type="button" class="pure-button" @click="closeBoosterConfirm()">Cancel</button>
+        <button type="button" class="pure-button pure-button-warning" :disabled="returningToBooster"
+          @click="returnToBooster()" x-text="returningToBooster ? 'Returning…' : 'Return to Booster'"></button>
+      </div>
+    </div>
+  </div>
   <!-- Footer information in-page -->
   <footer class="footer">
     <p>&copy; 2025 GOODDATA LABS SLU. All rights reserved.</p>

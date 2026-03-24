@@ -57,6 +57,22 @@ body {
   color: #333;
 }
 
+.nav-bar .pure-menu-link.booster-menu-link {
+  color: #b45309;
+  font-weight: 700;
+}
+
+.nav-bar .pure-menu-link.booster-menu-link:hover,
+.nav-bar .pure-menu-link.booster-menu-link:focus {
+  background: #b45309;
+  color: #fff;
+}
+
+.nav-bar .pure-menu-link.booster-menu-link.is-disabled {
+  color: #9ca3af;
+  pointer-events: none;
+}
+
 /* Active/hover states */
 .nav-bar .pure-menu-selected .pure-menu-link,
 .nav-bar .pure-menu-link:hover {
@@ -554,6 +570,15 @@ ul.device-tags li {
   margin-left: 0.5rem;
 }
 
+.booster-confirm-modal h3 {
+  margin-top: 0;
+  color: #8a3d00;
+}
+
+.booster-confirm-modal p {
+  margin-bottom: 0.75rem;
+}
+
 /* Modal Information Icon */
 .modal-info-icon {
   color: #008000;
@@ -734,6 +759,119 @@ th.sorted {
 
 .detail-modal[ x-cloak] {
   display: none;
+}
+
+.disk-modal-content {
+  min-width: 320px;
+  max-width: 560px;
+}
+
+.disk-size-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 0.75rem;
+  margin: 1rem 0;
+}
+
+.disk-size-option {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  align-items: flex-start;
+  text-align: left;
+  padding: 0.85rem 1rem;
+  border: 1px solid #d5dce6;
+  border-radius: 8px;
+  background: #f8fbff;
+  color: #1f2937;
+}
+
+.disk-size-option strong {
+  font-size: 0.95rem;
+}
+
+.disk-size-option span {
+  font-size: 0.82rem;
+  color: #4b5563;
+}
+
+.disk-size-option.active {
+  border-color: #0078e7;
+  background: #eaf4ff;
+  box-shadow: inset 0 0 0 1px rgba(0, 120, 231, 0.15);
+}
+
+.disk-size-option:hover {
+  background: #eef6ff;
+}
+
+.disk-field-label {
+  display: block;
+  margin-top: 0.5rem;
+  margin-bottom: 0.35rem;
+  font-weight: 600;
+}
+
+.disk-label-input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 0.7rem 0.8rem;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  font-family: monospace;
+  font-size: 1rem;
+  text-transform: uppercase;
+}
+
+.disk-file-input-group {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+.disk-file-input {
+  flex: 1 1 auto;
+}
+
+.disk-fixed-ext {
+  flex: 0 0 auto;
+  min-width: 3.5rem;
+  padding: 0.7rem 0.8rem;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  background: #eef2f7;
+  color: #374151;
+  font-family: monospace;
+  font-weight: 600;
+  text-align: center;
+}
+
+.disk-field-help {
+  margin: 0.6rem 0 0;
+  color: #4b5563;
+  font-size: 0.88rem;
+  line-height: 1.4;
+}
+
+.disk-preview-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 1rem;
+  margin-top: 0.85rem;
+  padding-top: 0.85rem;
+  border-top: 1px solid #e5e7eb;
+}
+
+.disk-preview-row code {
+  font-size: 0.95rem;
+}
+
+.disk-modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.6rem;
+  margin-top: 1.25rem;
 }
 
 /* Monospace filename in detail modal */
