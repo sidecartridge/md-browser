@@ -211,19 +211,98 @@ static bool url_decode(const char *in, char *out, size_t outLen) {
 static bool json_appendf(char *buf, size_t buf_size, size_t *buf_len,
                          const char *fmt, ...) {
   if (!buf || !buf_len || *buf_len >= buf_size) return false;
+  size_t original_len = *buf_len;
   va_list args;
   va_start(args, fmt);
   int written = vsnprintf(buf + *buf_len, buf_size - *buf_len, fmt, args);
   va_end(args);
   if (written < 0) return false;
   if ((size_t)written >= buf_size - *buf_len) {
-    // vsnprintf truncated; ensure buffer is null-terminated.
-    buf[buf_size - 1] = '\0';
-    *buf_len = buf_size - 1;
+    // Keep the buffer at the last known-good JSON boundary on truncation.
+    buf[original_len] = '\0';
+    *buf_len = original_len;
     return false;
   }
   *buf_len += (size_t)written;
   return true;
+}
+
+static bool json_append_bytes(char *buf, size_t buf_size, size_t *buf_len,
+                              const char *src, size_t src_len) {
+  if (!buf || !buf_len || !src) return false;
+  if (*buf_len >= buf_size) return false;
+  if (src_len > (buf_size - *buf_len - 1)) return false;
+
+  memcpy(buf + *buf_len, src, src_len);
+  *buf_len += src_len;
+  buf[*buf_len] = '\0';
+  return true;
+}
+
+static bool json_append_escaped_string(char *buf, size_t buf_size,
+                                       size_t *buf_len, const char *value) {
+  if (!value) return false;
+
+  size_t original_len = *buf_len;
+  if (!json_append_bytes(buf, buf_size, buf_len, "\"", 1)) goto rollback;
+
+  for (const unsigned char *p = (const unsigned char *)value; *p != '\0'; p++) {
+    switch (*p) {
+      case '\"':
+        if (!json_append_bytes(buf, buf_size, buf_len, "\\\"", 2)) {
+          goto rollback;
+        }
+        break;
+      case '\\':
+        if (!json_append_bytes(buf, buf_size, buf_len, "\\\\", 2)) {
+          goto rollback;
+        }
+        break;
+      case '\b':
+        if (!json_append_bytes(buf, buf_size, buf_len, "\\b", 2)) {
+          goto rollback;
+        }
+        break;
+      case '\f':
+        if (!json_append_bytes(buf, buf_size, buf_len, "\\f", 2)) {
+          goto rollback;
+        }
+        break;
+      case '\n':
+        if (!json_append_bytes(buf, buf_size, buf_len, "\\n", 2)) {
+          goto rollback;
+        }
+        break;
+      case '\r':
+        if (!json_append_bytes(buf, buf_size, buf_len, "\\r", 2)) {
+          goto rollback;
+        }
+        break;
+      case '\t':
+        if (!json_append_bytes(buf, buf_size, buf_len, "\\t", 2)) {
+          goto rollback;
+        }
+        break;
+      default:
+        if (*p < 0x20) {
+          if (!json_appendf(buf, buf_size, buf_len, "\\u%04x", *p)) {
+            goto rollback;
+          }
+        } else if (!json_append_bytes(buf, buf_size, buf_len, (const char *)p,
+                                      1)) {
+          goto rollback;
+        }
+        break;
+    }
+  }
+
+  if (!json_append_bytes(buf, buf_size, buf_len, "\"", 1)) goto rollback;
+  return true;
+
+rollback:
+  buf[original_len] = '\0';
+  *buf_len = original_len;
+  return false;
 }
 
 /**
@@ -366,9 +445,13 @@ static const char *cgi_folder(int iIndex, int iNumParams, char *pcParam[],
     if (fr != FR_OK || fno.fname[0] == '\0') break;
     if (fno.fattrib & AM_DIR) {
       DPRINTF("DIR: %s/%s\n", folder_abs, fno.fname);
+      size_t entry_start = json_len;
       /* Append folder name to JSON array */
-      if (!json_appendf(json_buff, sizeof(json_buff), &json_len, "\"%s\",",
-                        fno.fname)) {
+      if (!json_append_escaped_string(json_buff, sizeof(json_buff), &json_len,
+                                      fno.fname) ||
+          !json_appendf(json_buff, sizeof(json_buff), &json_len, ",")) {
+        json_buff[entry_start] = '\0';
+        json_len = entry_start;
         truncated = true;
         break;
       }
@@ -561,9 +644,15 @@ static const char *cgi_ls(int iIndex, int iNumParams, char *pcParam[],
     /* Build JSON object for each entry */
     /* Combine date and time into a single ts field */
     unsigned ts = ((unsigned)fno.fdate << 16) | (unsigned)fno.ftime;
-    if (!json_appendf(json_buff, sizeof(json_buff), &json_len,
-                      "{\"n\":\"%s\",\"a\":%u,\"s\":%lu,\"t\":%u},", fno.fname,
+    size_t entry_start = json_len;
+    if (!json_appendf(json_buff, sizeof(json_buff), &json_len, "{\"n\":") ||
+        !json_append_escaped_string(json_buff, sizeof(json_buff), &json_len,
+                                    fno.fname) ||
+        !json_appendf(json_buff, sizeof(json_buff), &json_len,
+                      ",\"a\":%u,\"s\":%lu,\"t\":%u},",
                       (unsigned)fno.fattrib, (unsigned long)fno.fsize, ts)) {
+      json_buff[entry_start] = '\0';
+      json_len = entry_start;
       DPRINTF("JSON payload too large (%u chars), truncating listing\n",
               (unsigned)json_len);
       truncated = true;
