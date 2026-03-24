@@ -305,6 +305,323 @@ rollback:
   return false;
 }
 
+typedef struct {
+  const char *id;
+  uint16_t tracks;
+  uint8_t num_heads;
+  uint16_t sectors_per_track;
+  uint8_t media;
+} st_disk_geometry_t;
+
+typedef struct {
+  uint16_t bytes_per_sector;
+  uint8_t sectors_per_cluster;
+  uint16_t reserved_sectors;
+  uint8_t num_fats;
+  uint16_t root_entries;
+  uint16_t sectors_per_fat;
+  uint16_t sectors_per_track;
+  uint8_t num_heads;
+  uint16_t tracks;
+  uint32_t total_sectors;
+  uint8_t media;
+  uint16_t root_dir_sectors;
+  uint16_t total_clusters;
+  uint32_t img_size;
+} st_disk_params_t;
+
+static const st_disk_geometry_t st_disk_geometries[] = {
+    {"360KB", 40, 2, 9, 0xF9},
+    {"720KB", 80, 2, 9, 0xF9},
+    {"1.44MB", 80, 2, 18, 0xF0},
+    {"2.88MB", 80, 2, 36, 0xF0},
+};
+
+static const st_disk_geometry_t *find_st_disk_geometry(const char *id) {
+  if (!id) return NULL;
+  for (size_t i = 0; i < LWIP_ARRAYSIZE(st_disk_geometries); i++) {
+    if (strcmp(st_disk_geometries[i].id, id) == 0) {
+      return &st_disk_geometries[i];
+    }
+  }
+  return NULL;
+}
+
+static bool is_tos_label_char(char ch) {
+  return ((ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || ch == '_' ||
+          ch == '-');
+}
+
+static bool normalize_st_volume_label(const char *input, char *label11,
+                                      size_t label11_len, bool *has_label) {
+  if (!label11 || label11_len < 12 || !has_label) return false;
+
+  memset(label11, ' ', 11);
+  label11[11] = '\0';
+  *has_label = false;
+
+  const char *src = input ? input : "";
+  char cleaned[16] = {0};
+  size_t cleaned_len = 0;
+  bool dot_seen = false;
+
+  for (; *src != '\0' && cleaned_len < sizeof(cleaned) - 1; src++) {
+    unsigned char ch = (unsigned char)*src;
+    if (isspace(ch)) continue;
+    if (ch >= 'a' && ch <= 'z') ch = (unsigned char)(ch - 'a' + 'A');
+
+    if (ch == '.') {
+      if (dot_seen || cleaned_len == 0) return false;
+      dot_seen = true;
+      cleaned[cleaned_len++] = '.';
+      continue;
+    }
+
+    if (!is_tos_label_char((char)ch)) return false;
+    cleaned[cleaned_len++] = (char)ch;
+  }
+  cleaned[cleaned_len] = '\0';
+
+  if (cleaned_len == 0) return true;
+
+  char *dot = strchr(cleaned, '.');
+  if (!dot || strchr(dot + 1, '.') != NULL || dot[1] == '\0') return false;
+
+  size_t base_len = dot ? (size_t)(dot - cleaned) : strlen(cleaned);
+  size_t ext_len = dot ? strlen(dot + 1) : 0;
+  if (base_len == 0 || base_len > 8 || ext_len > 3) return false;
+
+  memcpy(label11, cleaned, base_len);
+  if (ext_len > 0) memcpy(label11 + 8, dot + 1, ext_len);
+  *has_label = true;
+  return true;
+}
+
+static bool normalize_st_file_stem(const char *input, char *stem,
+                                   size_t stem_len) {
+  if (!input || !stem || stem_len < 2) return false;
+
+  while (isspace((unsigned char)*input)) input++;
+
+  size_t in_len = strlen(input);
+  while (in_len > 0 && isspace((unsigned char)input[in_len - 1])) {
+    in_len--;
+  }
+
+  if (in_len == 0) return false;
+  if (in_len >= stem_len) return false;
+
+  memcpy(stem, input, in_len);
+  stem[in_len] = '\0';
+
+  size_t stem_len_used = in_len;
+  if (stem_len_used >= 3 && stem[stem_len_used - 3] == '.' &&
+      (stem[stem_len_used - 2] == 'S' || stem[stem_len_used - 2] == 's') &&
+      (stem[stem_len_used - 1] == 'T' || stem[stem_len_used - 1] == 't')) {
+    stem_len_used -= 3;
+    stem[stem_len_used] = '\0';
+    while (stem_len_used > 0 &&
+           (isspace((unsigned char)stem[stem_len_used - 1]) ||
+            stem[stem_len_used - 1] == '.')) {
+      stem[--stem_len_used] = '\0';
+    }
+  }
+
+  if (stem_len_used == 0) return false;
+  if (strstr(stem, "..") != NULL) return false;
+  if (!validate_filename_only(stem)) return false;
+  return true;
+}
+
+static bool derive_st_disk_params(const st_disk_geometry_t *geometry,
+                                  st_disk_params_t *params) {
+  if (!geometry || !params) return false;
+
+  memset(params, 0, sizeof(*params));
+  params->bytes_per_sector = 512;
+  params->sectors_per_cluster = 2;
+  params->reserved_sectors = 1;
+  params->num_fats = 2;
+  params->root_entries = 112;
+  params->media = geometry->media;
+  params->num_heads = geometry->num_heads;
+  params->sectors_per_track = geometry->sectors_per_track;
+  params->tracks = geometry->tracks;
+  params->total_sectors = (uint32_t)geometry->tracks * geometry->num_heads *
+                          geometry->sectors_per_track;
+  params->root_dir_sectors =
+      (uint16_t)(((params->root_entries * 32u) + params->bytes_per_sector - 1u) /
+                 params->bytes_per_sector);
+
+  uint16_t sectors_per_fat = 1;
+  uint16_t total_clusters = 0;
+  bool stable = false;
+  for (int i = 0; i < 16; i++) {
+    uint32_t first_data_sector = params->reserved_sectors +
+                                 (uint32_t)params->num_fats * sectors_per_fat +
+                                 params->root_dir_sectors;
+    if (params->total_sectors <= first_data_sector) return false;
+
+    uint32_t data_sectors = params->total_sectors - first_data_sector;
+    uint16_t clusters_guess =
+        (uint16_t)(data_sectors / params->sectors_per_cluster);
+    uint32_t entries = (uint32_t)clusters_guess + 2u;
+    uint32_t fat_bytes = (entries * 3u + 1u) / 2u;
+    uint16_t new_sectors_per_fat =
+        (uint16_t)((fat_bytes + params->bytes_per_sector - 1u) /
+                   params->bytes_per_sector);
+
+    if (new_sectors_per_fat == sectors_per_fat) {
+      total_clusters = clusters_guess;
+      stable = true;
+      break;
+    }
+    sectors_per_fat = new_sectors_per_fat;
+  }
+
+  if (!stable || total_clusters == 0 || total_clusters >= 4084) return false;
+
+  params->sectors_per_fat = sectors_per_fat;
+  params->total_clusters = total_clusters;
+  params->img_size = params->total_sectors * params->bytes_per_sector;
+  return true;
+}
+
+static void set_u16le(uint8_t *buf, size_t offset, uint16_t value) {
+  buf[offset] = (uint8_t)(value & 0xFFu);
+  buf[offset + 1] = (uint8_t)((value >> 8) & 0xFFu);
+}
+
+static void set_tos_boot_checksum(uint8_t *boot_sector) {
+  boot_sector[510] = 0;
+  boot_sector[511] = 0;
+
+  uint32_t sum = 0;
+  for (size_t i = 0; i < 512; i += 2) {
+    sum = (sum + (((uint16_t)boot_sector[i] << 8) | boot_sector[i + 1])) &
+          0xFFFFu;
+  }
+
+  uint16_t needed = (uint16_t)((0x1234u - sum) & 0xFFFFu);
+  boot_sector[510] = (uint8_t)((needed >> 8) & 0xFFu);
+  boot_sector[511] = (uint8_t)(needed & 0xFFu);
+}
+
+static void build_tos_boot_sector(const st_disk_params_t *params,
+                                  const char *label11, uint8_t *boot_sector) {
+  memset(boot_sector, 0, 512);
+  boot_sector[0] = 0x4E;
+  boot_sector[1] = 0x75;  // RTS
+  memcpy(boot_sector + 3, "TOS     ", 8);
+
+  set_u16le(boot_sector, 11, params->bytes_per_sector);
+  boot_sector[13] = params->sectors_per_cluster;
+  set_u16le(boot_sector, 14, params->reserved_sectors);
+  boot_sector[16] = params->num_fats;
+  set_u16le(boot_sector, 17, params->root_entries);
+  set_u16le(boot_sector, 19, (uint16_t)params->total_sectors);
+  boot_sector[21] = params->media;
+  set_u16le(boot_sector, 22, params->sectors_per_fat);
+  set_u16le(boot_sector, 24, params->sectors_per_track);
+  set_u16le(boot_sector, 26, params->num_heads);
+  memcpy(boot_sector + 43, label11, 11);
+  memcpy(boot_sector + 54, "FAT12   ", 8);
+  set_tos_boot_checksum(boot_sector);
+}
+
+static void build_volume_label_entry(const char *label11, uint8_t *entry) {
+  memset(entry, 0, 32);
+  memcpy(entry, label11, 11);
+  entry[11] = 0x08;
+}
+
+static FRESULT write_full(FIL *file, const void *buf, UINT len) {
+  UINT written = 0;
+  FRESULT result = f_write(file, buf, len, &written);
+  if (result != FR_OK) return result;
+  if (written != len) return FR_DISK_ERR;
+  return FR_OK;
+}
+
+static FRESULT create_blank_st_image(const char *path, const char *label11,
+                                     bool has_volume_label,
+                                     const st_disk_geometry_t *geometry,
+                                     uint32_t *out_img_size) {
+  if (!path || !label11 || !geometry) return FR_INVALID_PARAMETER;
+
+  st_disk_params_t params;
+  if (!derive_st_disk_params(geometry, &params)) return FR_INVALID_OBJECT;
+
+  uint8_t boot_sector[512] = {0};
+  build_tos_boot_sector(&params, label11, boot_sector);
+
+  size_t fat_size = (size_t)params.sectors_per_fat * params.bytes_per_sector;
+  size_t root_size = (size_t)params.root_dir_sectors * params.bytes_per_sector;
+  size_t zero_chunk_size = 4096;
+  if (zero_chunk_size > root_size && root_size > 0) {
+    zero_chunk_size = root_size;
+  }
+  if (zero_chunk_size < 512) zero_chunk_size = 512;
+
+  uint8_t *fat = calloc(1, fat_size);
+  uint8_t *root = calloc(1, root_size);
+  uint8_t *zero_chunk = calloc(1, zero_chunk_size);
+  FIL file;
+  bool file_open = false;
+  bool file_created = false;
+  FRESULT result = FR_NOT_ENOUGH_CORE;
+
+  if (!fat || !root || !zero_chunk) goto cleanup;
+
+  fat[0] = params.media;
+  fat[1] = 0xFF;
+  fat[2] = 0xFF;
+  if (has_volume_label) {
+    build_volume_label_entry(label11, root);
+  }
+
+  result = f_open(&file, path, FA_CREATE_NEW | FA_WRITE);
+  if (result != FR_OK) goto cleanup;
+  file_open = true;
+  file_created = true;
+
+  result = write_full(&file, boot_sector, sizeof(boot_sector));
+  if (result != FR_OK) goto cleanup;
+  result = write_full(&file, fat, (UINT)fat_size);
+  if (result != FR_OK) goto cleanup;
+  result = write_full(&file, fat, (UINT)fat_size);
+  if (result != FR_OK) goto cleanup;
+  result = write_full(&file, root, (UINT)root_size);
+  if (result != FR_OK) goto cleanup;
+
+  uint32_t written_bytes =
+      (uint32_t)(sizeof(boot_sector) + fat_size + fat_size + root_size);
+  while (written_bytes < params.img_size) {
+    uint32_t remaining = params.img_size - written_bytes;
+    UINT chunk = (UINT)((remaining < zero_chunk_size) ? remaining : zero_chunk_size);
+    result = write_full(&file, zero_chunk, chunk);
+    if (result != FR_OK) goto cleanup;
+    written_bytes += chunk;
+  }
+
+  result = f_sync(&file);
+  if (result != FR_OK) goto cleanup;
+  if (out_img_size) *out_img_size = params.img_size;
+
+cleanup:
+  if (file_open) {
+    FRESULT close_result = f_close(&file);
+    if (result == FR_OK) result = close_result;
+  }
+  if (result != FR_OK && file_created) {
+    (void)f_unlink(path);
+  }
+  free(zero_chunk);
+  free(root);
+  free(fat);
+  return result;
+}
+
 /**
  * @brief Array of SSI tags for the HTTP server.
  *
@@ -512,6 +829,128 @@ static const char *cgi_mkdir(int iIndex, int iNumParams, char *pcParam[],
              r);
   else
     strcpy(json_buff, "{\"status\":\"created\"}");
+  return "/json.shtml";
+}
+
+static const char *cgi_booster(int iIndex, int iNumParams, char *pcParam[],
+                               char *pcValue[]) {
+  LWIP_UNUSED_ARG(iIndex);
+  LWIP_UNUSED_ARG(iNumParams);
+  LWIP_UNUSED_ARG(pcParam);
+  LWIP_UNUSED_ARG(pcValue);
+
+  mngr_schedule_booster_start(1000);
+  strcpy(json_buff, "{\"status\":\"returning_to_booster\"}");
+  return "/json.shtml";
+}
+
+// CGI: create blank Atari ST disk image
+static const char *cgi_mkst(int iIndex, int iNumParams, char *pcParam[],
+                            char *pcValue[]) {
+  LWIP_UNUSED_ARG(iIndex);
+
+  const char *folder = NULL;
+  const char *type = NULL;
+  const char *label = NULL;
+  const char *name = NULL;
+  char decoded_folder[MNGR_HTTPD_MAX_FOLDER_LEN] = {0};
+  char decoded_label[16] = {0};
+  char decoded_name[MNGR_HTTPD_MAX_NAME_LEN] = {0};
+  char folder_abs[MNGR_HTTPD_MAX_FOLDER_LEN] = {0};
+  char label11[12] = {0};
+  bool has_volume_label = false;
+  char stem[MNGR_HTTPD_MAX_NAME_LEN] = {0};
+  char file_name[MNGR_HTTPD_MAX_NAME_LEN + 4] = {0};
+  char *path = NULL;
+
+  for (int i = 0; i < iNumParams; i++) {
+    if (!strcmp(pcParam[i], "folder")) folder = pcValue[i];
+    if (!strcmp(pcParam[i], "type")) type = pcValue[i];
+    if (!strcmp(pcParam[i], "label")) label = pcValue[i];
+    if (!strcmp(pcParam[i], "name")) name = pcValue[i];
+  }
+
+  if (!folder || !type || !name) {
+    strcpy(json_buff, "{\"error\":\"missing parameters\"}");
+    return "/json.shtml";
+  }
+
+  const st_disk_geometry_t *geometry = find_st_disk_geometry(type);
+  if (!geometry) {
+    strcpy(json_buff, "{\"error\":\"invalid disk type\"}");
+    return "/json.shtml";
+  }
+
+  if (!url_decode(folder, decoded_folder, sizeof(decoded_folder)) ||
+      !normalize_and_validate_path(decoded_folder, folder_abs,
+                                   sizeof(folder_abs))) {
+    strcpy(json_buff, "{\"error\":\"invalid folder\"}");
+    return "/json.shtml";
+  }
+
+  if (label && *label != '\0' &&
+      !url_decode(label, decoded_label, sizeof(decoded_label))) {
+    strcpy(json_buff, "{\"error\":\"invalid label encoding\"}");
+    return "/json.shtml";
+  }
+  if (!url_decode(name, decoded_name, sizeof(decoded_name))) {
+    strcpy(json_buff, "{\"error\":\"invalid file name encoding\"}");
+    return "/json.shtml";
+  }
+
+  if (!normalize_st_volume_label(decoded_label, label11, sizeof(label11),
+                                 &has_volume_label)) {
+    strcpy(
+        json_buff,
+        "{\"error\":\"invalid volume name: leave empty or use 8.3 format "
+        "like DISK.001\"}");
+    return "/json.shtml";
+  }
+  if (!normalize_st_file_stem(decoded_name, stem, sizeof(stem))) {
+    strcpy(json_buff,
+           "{\"error\":\"invalid file name: use 1-8 uppercase characters\"}");
+    return "/json.shtml";
+  }
+
+  int file_name_len = snprintf(file_name, sizeof(file_name), "%s.ST", stem);
+  if (file_name_len < 0 || (size_t)file_name_len >= sizeof(file_name)) {
+    strcpy(json_buff, "{\"error\":\"generated filename too long\"}");
+    return "/json.shtml";
+  }
+
+  path = calloc(1, MNGR_HTTPD_MAX_PATH_LEN);
+  if (!path) {
+    strcpy(json_buff, "{\"error\":\"out of memory\"}");
+    return "/json.shtml";
+  }
+
+  if (!join_root_folder_name(folder_abs, file_name, path,
+                             MNGR_HTTPD_MAX_PATH_LEN)) {
+    strcpy(json_buff, "{\"error\":\"invalid target path\"}");
+    free(path);
+    return "/json.shtml";
+  }
+
+  uint32_t img_size = 0;
+  FRESULT result =
+      create_blank_st_image(path, label11, has_volume_label, geometry,
+                            &img_size);
+  free(path);
+
+  if (result == FR_EXIST) {
+    strcpy(json_buff, "{\"error\":\"target file already exists\"}");
+    return "/json.shtml";
+  }
+  if (result != FR_OK) {
+    snprintf(json_buff, sizeof(json_buff), "{\"error\":\"create image failed "
+                                           "%d\"}",
+             result);
+    return "/json.shtml";
+  }
+
+  snprintf(json_buff, sizeof(json_buff),
+           "{\"status\":\"created\",\"file\":\"%s\",\"sizeBytes\":%lu}",
+           file_name, (unsigned long)img_size);
   return "/json.shtml";
 }
 
@@ -1303,6 +1742,8 @@ static const tCGI cgi_handlers[] = {
     {"/upload_cancel.cgi", cgi_upload_cancel},
     {"/ren.cgi", cgi_ren},
     {"/mkdir.cgi", cgi_mkdir},
+    {"/booster.cgi", cgi_booster},
+    {"/mkst.cgi", cgi_mkst},
     {"/del.cgi", cgi_del},
     {"/attr.cgi", cgi_attr},
     {"/download_start.cgi", cgi_download_start},

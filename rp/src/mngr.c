@@ -10,6 +10,8 @@
 
 static bool startBooster =
     false;  // Flag to indicate if the booster should start
+static bool boosterStartScheduled = false;
+static absolute_time_t boosterStartTime = {0};
 
 // Single-producer (ISR) / single-consumer (main loop) ring buffer for parsed
 // protocol commands. This avoids races on a single shared struct/flag.
@@ -33,6 +35,13 @@ static volatile uint32_t protocolRingDropped = 0;
 static uint32_t memorySharedAddress = 0;
 static uint32_t memoryRandomTokenAddress = 0;
 static uint32_t memoryRandomTokenSeedAddress = 0;
+
+static void mngr_start_booster_now(void) {
+  if (startBooster) return;
+  SEND_COMMAND_TO_DISPLAY(DISPLAY_COMMAND_BOOSTER);
+  startBooster = true;
+  DPRINTF("Send command to display: DISPLAY_COMMAND_BOOSTER\n");
+}
 
 /**
  * @brief Callback that handles the protocol command received.
@@ -119,6 +128,12 @@ void mngr_preinit() {
   TPROTO_SET_RANDOM_TOKEN(memoryRandomTokenSeedAddress, newRandomSeedToken);
 }
 
+void mngr_schedule_booster_start(uint32_t delay_ms) {
+  boosterStartScheduled = true;
+  boosterStartTime = make_timeout_time_ms(delay_ms);
+  DPRINTF("Booster start scheduled in %lu ms\n", (unsigned long)delay_ms);
+}
+
 // Invoke this function to process the commands from the active loop in the
 // main function
 void __not_in_flash_func(mngr_loop)() {
@@ -200,9 +215,7 @@ void __not_in_flash_func(mngr_loop)() {
     // Handle the command
     switch (lastProtocol->command_id) {
       case APP_BOOSTER_START: {
-        SEND_COMMAND_TO_DISPLAY(DISPLAY_COMMAND_BOOSTER);
-        startBooster = true;  // Set the flag to start the booster
-        DPRINTF("Send command to display: DISPLAY_COMMAND_BOOSTER\n");
+        mngr_start_booster_now();
       } break;
       default:
         // Unknown command
@@ -344,10 +357,23 @@ int mngr_init() {
 
   bool usbInitialized = false;  // USB not initialized yet
   while (!startBooster) {
+    if (boosterStartScheduled &&
+        (absolute_time_diff_us(get_absolute_time(), boosterStartTime) < 0)) {
+      boosterStartScheduled = false;
+      mngr_start_booster_now();
+      continue;
+    }
+
+    int wait_ms = 10;
+    if (download_getStatus() == DOWNLOAD_STATUS_STARTED ||
+        download_getStatus() == DOWNLOAD_STATUS_IN_PROGRESS) {
+      wait_ms = 1;
+    }
 #if PICO_CYW43_ARCH_POLL
     network_safePoll();
+    cyw43_arch_wait_for_work_until(make_timeout_time_ms(wait_ms));
 #else
-    sleep_ms(100);
+    sleep_ms(wait_ms);
 #endif
 
     // Check remote commands

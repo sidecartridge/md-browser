@@ -82,5 +82,6 @@ void mngr_dma_irq_handler_lookup(void);
 
 int mngr_init(void);
 void mngr_loop();
+void mngr_schedule_booster_start(uint32_t delay_ms);
 
 #endif  // MNGR_H
