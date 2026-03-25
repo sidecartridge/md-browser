@@ -18,6 +18,7 @@
 #include <string.h>
 
 #include "constants.h"
+#include "copy.h"
 #include "debug.h"
 #include "download.h"
 #include "include/aconfig.h"

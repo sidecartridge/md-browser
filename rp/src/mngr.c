@@ -7,6 +7,7 @@
  */
 
 #include "mngr.h"
+#include "copy.h"
 
 static bool startBooster =
     false;  // Flag to indicate if the booster should start
@@ -366,7 +367,8 @@ int mngr_init() {
 
     int wait_ms = 10;
     if (download_getStatus() == DOWNLOAD_STATUS_STARTED ||
-        download_getStatus() == DOWNLOAD_STATUS_IN_PROGRESS) {
+        download_getStatus() == DOWNLOAD_STATUS_IN_PROGRESS ||
+        copy_is_active()) {
       wait_ms = 1;
     }
 #if PICO_CYW43_ARCH_POLL
@@ -457,6 +459,10 @@ int mngr_init() {
                 (int)download_getStatus());
         download_setStatus(DOWNLOAD_STATUS_IDLE);
         break;
+    }
+
+    if (copy_is_active()) {
+      copy_poll();
     }
   }
 
