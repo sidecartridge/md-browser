@@ -43,6 +43,8 @@
         showNew: true,    // only show newest entries when checked
         returningToBooster: false,
         boosterConfirmVisible: false,
+        boosterLaunchingVisible: false,
+        boosterPollTimer: null,
         bannerVisible: false,
         bannerType: 'info',
         bannerMessage: '',
@@ -171,6 +173,28 @@
           if (this.returningToBooster) return;
           this.boosterConfirmVisible = false;
         },
+        clearBoosterPollTimer() {
+          if (this.boosterPollTimer) {
+            clearTimeout(this.boosterPollTimer);
+            this.boosterPollTimer = null;
+          }
+        },
+        scheduleBoosterCheck(delay = 5000) {
+          this.clearBoosterPollTimer();
+          this.boosterPollTimer = setTimeout(() => this.checkBoosterReady(), delay);
+        },
+        async checkBoosterReady() {
+          try {
+            const res = await fetch('/mngr_home.shtml', { cache: 'no-store' });
+            if (res.ok) {
+              window.location.href = '/mngr_home.shtml';
+              return;
+            }
+          } catch (_) {
+            // Ignore polling failures while Booster is still starting.
+          }
+          this.scheduleBoosterCheck(5000);
+        },
         bannerIconClass() {
           switch (this.bannerType) {
             case 'success': return 'fas fa-check-circle banner-icon';
@@ -183,18 +207,23 @@
           if (this.returningToBooster) return;
           this.boosterConfirmVisible = false;
           this.returningToBooster = true;
-          this.showBanner('Returning to Booster...', 'info');
+          this.boosterLaunchingVisible = true;
           try {
-            const res = await fetch('/booster.cgi');
-            const result = await res.json();
-            if (result.error) {
-              this.returningToBooster = false;
-              this.showBanner('Return to Booster failed: ' + result.error, 'error');
+            const res = await fetch('/booster.cgi', { cache: 'no-store' });
+            if (res.ok) {
+              const result = await res.json();
+              if (result.error) {
+                this.returningToBooster = false;
+                this.boosterLaunchingVisible = false;
+                this.showBanner('Return to Booster failed: ' + result.error, 'error');
+                return;
+              }
             }
           } catch (_) {
-            // Ignore network failures here; the device may already be switching
-            // to Booster mode.
+            // Ignore launch request failures here; the device may already be
+            // switching to Booster mode.
           }
+          this.scheduleBoosterCheck(5000);
         }
       };
     }
@@ -324,6 +353,19 @@
         <button type="button" class="pure-button" @click="closeBoosterConfirm()">Cancel</button>
         <button type="button" class="pure-button pure-button-warning" :disabled="returningToBooster"
           @click="returnToBooster()" x-text="returningToBooster ? 'Returning…' : 'Return to Booster'"></button>
+      </div>
+    </div>
+  </div>
+  <div x-show="boosterLaunchingVisible" x-cloak class="modal">
+    <div class="modal-overlay"></div>
+    <div class="modal-content booster-confirm-modal booster-launch-modal">
+      <div class="booster-launch-content">
+        <i class="fas fa-spinner fa-spin modal-info-icon booster-launch-icon"></i>
+        <div>
+          <h3>Launching Booster...</h3>
+          <p>Please wait while the device switches back to Booster mode.</p>
+          <p>The page will redirect automatically when Booster is ready.</p>
+        </div>
       </div>
     </div>
   </div>

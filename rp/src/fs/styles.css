@@ -517,6 +517,12 @@ ul.device-tags li {
   border-radius: 4px;
 }
 
+.folder-loading-item {
+  padding: 0.75rem 0.8rem;
+  color: #555;
+  font-family: "Courier New", Courier, monospace;
+}
+
 .modal[x-show="showDeleteModal"] {
   display: flex;
 }
@@ -577,6 +583,20 @@ ul.device-tags li {
 
 .booster-confirm-modal p {
   margin-bottom: 0.75rem;
+}
+
+.booster-launch-modal {
+  width: 420px;
+}
+
+.booster-launch-content {
+  display: flex;
+  align-items: flex-start;
+  gap: 1rem;
+}
+
+.booster-launch-icon {
+  margin-top: 0.1rem;
 }
 
 /* Modal Information Icon */
@@ -707,6 +727,17 @@ th.sorted {
   text-decoration: underline;
 }
 
+.folder-loading-cell {
+  color: #555;
+  font-family: "Courier New", Courier, monospace;
+  padding: 1rem 0.75rem;
+  text-align: center;
+}
+
+.folder-loading-cell i {
+  margin-right: 0.5rem;
+}
+
 /* ---------- Upload Progress Modal ---------- */
 .upload-modal {
   position: fixed;
@@ -812,6 +843,52 @@ th.sorted {
   font-weight: 600;
 }
 
+.disk-format-group {
+  margin: 1rem 0 0;
+  padding: 0;
+  border: 0;
+}
+
+.disk-format-option {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.75rem;
+  padding: 0.75rem 0.85rem;
+  margin-top: 0.55rem;
+  border: 1px solid #d5dce6;
+  border-radius: 8px;
+  background: #f8fbff;
+  cursor: pointer;
+}
+
+.disk-format-option input {
+  margin-top: 0.2rem;
+  flex: 0 0 auto;
+}
+
+.disk-format-option span {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+
+.disk-format-option strong {
+  font-size: 0.95rem;
+  line-height: 1.2;
+}
+
+.disk-format-option small {
+  color: #4b5563;
+  font-size: 0.82rem;
+  line-height: 1.35;
+}
+
+.disk-format-option.active {
+  border-color: #0078e7;
+  background: #eaf4ff;
+  box-shadow: inset 0 0 0 1px rgba(0, 120, 231, 0.15);
+}
+
 .disk-label-input {
   width: 100%;
   box-sizing: border-box;
@@ -874,6 +951,62 @@ th.sorted {
   margin-top: 1.25rem;
 }
 
+.copy-destination-modal {
+  width: min(92vw, 520px);
+}
+
+.convert-modal {
+  width: min(92vw, 520px);
+}
+
+.copy-modal-help {
+  margin: 0.9rem 0 0;
+  color: #4b5563;
+  font-size: 0.92rem;
+}
+
+.copy-progress-content {
+  min-width: min(92vw, 520px);
+  max-width: 520px;
+  text-align: left;
+}
+
+.copy-progress-path {
+  margin: 0.5rem 0;
+  word-break: break-word;
+}
+
+.copy-summary-line {
+  margin: 0.75rem 0 0;
+  text-align: center;
+}
+
+.copy-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 0.75rem;
+  margin-top: 1rem;
+}
+
+.copy-summary-grid div {
+  background: #f8fafc;
+  border: 1px solid #dbe3ec;
+  border-radius: 8px;
+  padding: 0.75rem 0.85rem;
+}
+
+.copy-summary-grid span {
+  display: block;
+  font-size: 0.82rem;
+  color: #475569;
+  margin-bottom: 0.25rem;
+}
+
+.copy-summary-grid strong {
+  font-family: monospace;
+  font-size: 0.95rem;
+}
+
 /* Monospace filename in detail modal */
 .detail-filename {
   font-family: monospace;
@@ -902,6 +1035,42 @@ th.sorted {
 .delete-icon {
   color: #d9534f;
   cursor: pointer;
+}
+
+.copy-icon {
+  color: #2563eb;
+  cursor: pointer;
+}
+
+.copy-icon:hover {
+  color: #1d4ed8;
+}
+
+.move-icon {
+  color: #b45309;
+  cursor: pointer;
+}
+
+.move-icon:hover {
+  color: #92400e;
+}
+
+.convert-icon {
+  color: #0f766e;
+  cursor: pointer;
+}
+
+.convert-icon:hover {
+  color: #115e59;
+}
+
+.convert-icon-disabled {
+  color: #94a3b8;
+  cursor: default;
+}
+
+.convert-icon-disabled:hover {
+  color: #94a3b8;
 }
 
 .delete-icon:hover {

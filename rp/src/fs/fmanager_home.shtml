@@ -25,6 +25,9 @@
       return {
         // Current folder path
         folder: '/',
+        items: [],
+        folderLoading: false,
+        folderLoadToken: 0,
         // Upload in progress flag
         uploading: false,
         // Default sort: by name ascending
@@ -42,38 +45,104 @@
         newDiskType: '720KB',
         newDiskLabel: '',
         newDiskFileName: '',
+        newDiskExtension: 'st',
+        convertDialogVisible: false,
+        convertingDisk: false,
+        convertSourceItem: {},
+        convertTargetFile: '',
+        convertMode: '',
+        copyDestinationVisible: false,
+        copyProgressVisible: false,
+        copyStarting: false,
+        copyCancelling: false,
+        copyOperation: 'copy',
+        copySourceFolder: '/',
+        copySourceItem: {},
+        copyDestinationFolder: '/',
+        copyDestinationList: [],
+        copyDestinationLoading: false,
+        copyDestinationLoadToken: 0,
+        copyPollTimer: null,
+        copyLastNotifiedStatus: '',
+        copyStatus: {
+          status: 'idle',
+          srcIsDir: false,
+          cancelRequested: false,
+          percent: 0,
+          filesTotal: 0,
+          filesDone: 0,
+          dirsTotal: 0,
+          dirsDone: 0,
+          bytesTotal: 0,
+          bytesDone: 0,
+          currentFileSize: 0,
+          currentFileDone: 0,
+          errorCode: 0,
+          src: '',
+          dst: '',
+          current: '',
+          currentDst: '',
+          error: ''
+        },
         returningToBooster: false,
         boosterConfirmVisible: false,
+        boosterLaunchingVisible: false,
+        boosterPollTimer: null,
         bannerVisible: false,
         bannerType: 'info',
         bannerMessage: '',
-        load(offset = 0) {
-          const url = `/ls.cgi?folder=${encodeURIComponent(this.folder)}` + (offset ? `&nextItem=${offset}` : '');
+        load(offset = 0, folder = this.folder, loadToken = null, pendingItems = null) {
+          const targetFolder = folder || '/';
+          const nextOffset = Number(offset || 0);
+          let activeToken = loadToken;
+          let nextItems = pendingItems;
+
+          if (nextOffset === 0 || activeToken === null) {
+            activeToken = ++this.folderLoadToken;
+            this.folderLoading = true;
+            this.items = [];
+            nextItems = [];
+          } else if (!Array.isArray(nextItems)) {
+            nextItems = [];
+          }
+
+          const url = `/ls.cgi?folder=${encodeURIComponent(targetFolder)}` + (nextOffset ? `&nextItem=${nextOffset}` : '');
           fetch(url)
             .then(res => res.ok ? res.json() : [])
             .then(data => {
+              if (activeToken !== this.folderLoadToken || targetFolder !== this.folder) return;
               let more = false;
+              const pageItems = Array.isArray(data) ? data.slice() : [];
               // Check for sentinel empty object indicating more data
-              if (data.length && Object.keys(data[data.length - 1]).length === 0) {
+              if (pageItems.length && Object.keys(pageItems[pageItems.length - 1]).length === 0) {
                 more = true;
-                data.pop();
+                pageItems.pop();
               }
-              if (offset === 0) this.items = [];
-              this.items = this.items.concat(data);
-              if (more) this.load(offset + data.length);
+              nextItems = nextItems.concat(pageItems);
+              if (more) {
+                this.load(nextOffset + pageItems.length, targetFolder, activeToken, nextItems);
+                return;
+              }
+              this.items = nextItems;
+              this.folderLoading = false;
             })
             .catch(() => {
-              if (offset === 0) this.items = [];
+              if (activeToken !== this.folderLoadToken || targetFolder !== this.folder) return;
+              this.items = [];
+              this.folderLoading = false;
             });
         },
         // Initialize by clearing and loading from offset 0
         init() {
-          this.items = [];
-          this.load(0);
+          this.load(0, this.folder);
+          this.pollCopyStatus(true);
         },
         toggleSort(key) {
           if (this.sortKey === key) this.sortAsc = !this.sortAsc;
           else { this.sortKey = key; this.sortAsc = true; }
+        },
+        itemIsDir(item) {
+          return !!(item && (item.a & 0x10));
         },
         itemsSorted() {
           // Sort all entries and then separate directories and files
@@ -114,16 +183,28 @@
           const mm = String(minutes).padStart(2, '0');
           return `${mo} ${dd} ${hh}:${mm}`;
         },
+        formatBytes(bytes) {
+          const value = Number(bytes || 0);
+          if (value < 1024) return `${value} B`;
+          if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;
+          if (value < 1024 * 1024 * 1024) return `${(value / (1024 * 1024)).toFixed(1)} MB`;
+          return `${(value / (1024 * 1024 * 1024)).toFixed(1)} GB`;
+        },
+        joinFolderAndName(folder, name) {
+          const base = folder && folder !== '/' ? folder.replace(/\/$/, '') : '';
+          return `${base}/${name}`;
+        },
         navigate(name) {
+          let newFolder = '/';
           if (name === '..') {
             const parts = this.folder.replace(/\/$/, '').split('/');
             parts.pop();
-            const newFolder = parts.join('/');
-            this.folder = newFolder || '/';
+            newFolder = parts.join('/') || '/';
           } else {
-            this.folder = this.folder.replace(/\/$/, '') + '/' + name;
+            newFolder = this.folder.replace(/\/$/, '') + '/' + name;
           }
-          this.load();
+          this.folder = newFolder;
+          this.load(0, newFolder);
         },
         // Handler for multiple file upload
         uploadFiles(event) {
@@ -243,6 +324,347 @@
           this.detailVisible = false;
           this.detailFile = {};
         },
+        convertModeForName(name) {
+          if (/\.msa$/i.test(name || '')) return 'msa2st';
+          if (/\.st(\.rw)?$/i.test(name || '')) return 'st2msa';
+          return '';
+        },
+        convertTargetNameForName(name) {
+          const sourceName = String(name || '');
+          if (/\.msa$/i.test(sourceName)) return sourceName.replace(/\.msa$/i, '.st');
+          if (/\.st\.rw$/i.test(sourceName)) return sourceName.replace(/\.st\.rw$/i, '.msa');
+          if (/\.st$/i.test(sourceName)) return sourceName.replace(/\.st$/i, '.msa');
+          return '';
+        },
+        canConvertFileItem(item) {
+          return !!(item && item.n && !(item.a & 0x10) && this.convertModeForName(item.n));
+        },
+        convertTooltipForName(name) {
+          return this.convertModeForName(name) === 'msa2st' ? 'Convert floppy image: MSA to ST' : 'Convert floppy image: ST to MSA';
+        },
+        convertActionLabelForName(name) {
+          return this.convertModeForName(name) === 'msa2st' ? 'Convert to .st' : 'Convert to .msa';
+        },
+        convertDialogTitle() {
+          return this.convertMode === 'msa2st' ? 'Convert MSA to ST' : 'Convert ST to MSA';
+        },
+        convertDialogHelp() {
+          return this.convertMode === 'msa2st'
+            ? 'This will create a new .st image in the current folder.'
+            : 'This will create a new .msa image in the current folder.';
+        },
+        convertSourcePathPreview() {
+          return this.convertSourceItem && this.convertSourceItem.n
+            ? this.joinFolderAndName(this.folder || '/', this.convertSourceItem.n)
+            : '';
+        },
+        convertTargetPathPreview() {
+          return this.convertTargetFile
+            ? this.joinFolderAndName(this.folder || '/', this.convertTargetFile)
+            : '';
+        },
+        resetConvertDialog() {
+          this.convertDialogVisible = false;
+          this.convertingDisk = false;
+          this.convertSourceItem = {};
+          this.convertTargetFile = '';
+          this.convertMode = '';
+        },
+        openConvertDialog(item) {
+          if (!this.canConvertFileItem(item)) return;
+          this.detailVisible = false;
+          this.convertSourceItem = Object.assign({}, item);
+          this.convertMode = this.convertModeForName(item.n);
+          this.convertTargetFile = this.convertTargetNameForName(item.n);
+          this.convertingDisk = false;
+          this.convertDialogVisible = true;
+        },
+        closeConvertDialog() {
+          if (this.convertingDisk) return;
+          this.resetConvertDialog();
+        },
+        async startConvertDisk() {
+          if (this.convertingDisk || !this.convertSourceItem || !this.convertSourceItem.n) return;
+          this.convertingDisk = true;
+          try {
+            const res = await fetch(`/floppy_convert.cgi?folder=${encodeURIComponent(this.folder)}` +
+              `&src=${encodeURIComponent(this.convertSourceItem.n)}`);
+            const result = await res.json();
+            if (result.error) {
+              this.showBanner('Convert disk failed: ' + result.error, 'error');
+              return;
+            }
+            const createdFile = result.file || this.convertTargetFile;
+            this.resetConvertDialog();
+            this.load(0);
+            this.showBanner(createdFile ? `Created ${createdFile}` : 'Disk image converted.', 'success');
+          } catch (_) {
+            this.showBanner('Convert disk failed', 'error');
+          } finally {
+            this.convertingDisk = false;
+          }
+        },
+        resetCopySelection() {
+          this.copySourceFolder = '/';
+          this.copySourceItem = {};
+          this.copyOperation = 'copy';
+          this.copyDestinationFolder = this.folder || '/';
+          this.copyDestinationList = [];
+          this.copyStarting = false;
+          this.copyCancelling = false;
+        },
+        defaultCopyStatus() {
+          return {
+            status: 'idle',
+            operation: 'copy',
+            srcIsDir: false,
+            cancelRequested: false,
+            percent: 0,
+            filesTotal: 0,
+            filesDone: 0,
+            dirsTotal: 0,
+            dirsDone: 0,
+            bytesTotal: 0,
+            bytesDone: 0,
+            currentFileSize: 0,
+            currentFileDone: 0,
+            errorCode: 0,
+            src: '',
+            dst: '',
+            current: '',
+            currentDst: '',
+            error: ''
+          };
+        },
+        applyCopyStatus(data) {
+          this.copyStatus = Object.assign(this.defaultCopyStatus(), data || {});
+          this.copyStatus.percent = Number(this.copyStatus.percent || 0);
+          this.copyStatus.operation = this.copyStatus.operation === 'move' ? 'move' : 'copy';
+        },
+        copyOperationLabel(operation = this.copyOperation) {
+          return operation === 'move' ? 'Move' : 'Copy';
+        },
+        copyOperationLower(operation = this.copyOperation) {
+          return operation === 'move' ? 'move' : 'copy';
+        },
+        copyOperationProgressLabel(operation = this.copyOperation) {
+          return operation === 'move' ? 'Moving' : 'Copying';
+        },
+        copyStatusActive() {
+          return this.copyStatus.status === 'scanning' || this.copyStatus.status === 'copying';
+        },
+        copyStatusTerminal() {
+          return this.copyStatus.status === 'completed' ||
+            this.copyStatus.status === 'failed' ||
+            this.copyStatus.status === 'cancelled';
+        },
+        copyProgressHeading() {
+          const operationLabel = this.copyStatus.operation === 'move' ? 'Move' : 'Copy';
+          switch (this.copyStatus.status) {
+            case 'scanning': return `Preparing ${operationLabel}`;
+            case 'copying': return this.copyOperationProgressLabel(this.copyStatus.operation);
+            case 'completed': return `${operationLabel} Completed`;
+            case 'failed': return `${operationLabel} Failed`;
+            case 'cancelled': return `${operationLabel} Cancelled`;
+            default: return operationLabel;
+          }
+        },
+        copySourcePathPreview() {
+          return this.copySourceItem && this.copySourceItem.n
+            ? this.joinFolderAndName(this.copySourceFolder || '/', this.copySourceItem.n)
+            : '';
+        },
+        copyTargetPathPreview() {
+          return this.copySourceItem && this.copySourceItem.n
+            ? this.joinFolderAndName(this.copyDestinationFolder || '/', this.copySourceItem.n)
+            : (this.copyDestinationFolder || '/');
+        },
+        clearCopyPollTimer() {
+          if (this.copyPollTimer) {
+            clearTimeout(this.copyPollTimer);
+            this.copyPollTimer = null;
+          }
+        },
+        async resetCopyStatus(clearBackend = true) {
+          this.clearCopyPollTimer();
+          let nextStatus = this.defaultCopyStatus();
+          if (clearBackend) {
+            try {
+              const res = await fetch('/copy_reset.cgi');
+              const result = await res.json();
+              if (!result.error) nextStatus = result;
+            } catch (_) {
+            }
+          }
+          this.applyCopyStatus(nextStatus);
+          this.copyLastNotifiedStatus = '';
+          this.copyProgressVisible = false;
+          this.copyCancelling = false;
+        },
+        scheduleCopyPoll() {
+          this.clearCopyPollTimer();
+          this.copyPollTimer = setTimeout(() => this.pollCopyStatus(), 400);
+        },
+        async loadCopyDestinationFolders(folder = this.copyDestinationFolder, loadToken = null) {
+          const targetFolder = folder || '/';
+          const activeToken = loadToken === null ? ++this.copyDestinationLoadToken : loadToken;
+          this.copyDestinationLoading = true;
+          this.copyDestinationList = [];
+          try {
+            const res = await fetch(`/folder.cgi?folder=${encodeURIComponent(targetFolder)}`);
+            let list = [];
+            if (res.ok) list = await res.json();
+            if (activeToken !== this.copyDestinationLoadToken || targetFolder !== this.copyDestinationFolder) return;
+            this.copyDestinationList = targetFolder !== '/'
+              ? ['..', ...list]
+              : list;
+          } catch (_) {
+            if (activeToken !== this.copyDestinationLoadToken || targetFolder !== this.copyDestinationFolder) return;
+            this.copyDestinationList = targetFolder !== '/' ? ['..'] : [];
+          } finally {
+            if (activeToken === this.copyDestinationLoadToken && targetFolder === this.copyDestinationFolder) {
+              this.copyDestinationLoading = false;
+            }
+          }
+        },
+        async openCopyDialog(item) {
+          if (!item || !item.n) return;
+          if (this.copyStatusActive()) {
+            this.showBanner('A file operation is already in progress.', 'warning');
+            return;
+          }
+          if (this.copyStatusTerminal()) await this.resetCopyStatus();
+          this.detailVisible = false;
+          this.copyOperation = 'copy';
+          this.copyLastNotifiedStatus = '';
+          this.copyDestinationLoading = false;
+          this.copySourceFolder = this.folder || '/';
+          this.copySourceItem = Object.assign({}, item);
+          this.copyDestinationFolder = this.folder || '/';
+          this.copyDestinationVisible = true;
+          this.copyStarting = false;
+          this.copyCancelling = false;
+          await this.loadCopyDestinationFolders(this.copyDestinationFolder);
+        },
+        async openMoveDialog(item) {
+          if (!item || !item.n) return;
+          if (this.copyStatusActive()) {
+            this.showBanner('A file operation is already in progress.', 'warning');
+            return;
+          }
+          if (this.copyStatusTerminal()) await this.resetCopyStatus();
+          this.detailVisible = false;
+          this.copyOperation = 'move';
+          this.copyLastNotifiedStatus = '';
+          this.copyDestinationLoading = false;
+          this.copySourceFolder = this.folder || '/';
+          this.copySourceItem = Object.assign({}, item);
+          this.copyDestinationFolder = this.folder || '/';
+          this.copyDestinationVisible = true;
+          this.copyStarting = false;
+          this.copyCancelling = false;
+          await this.loadCopyDestinationFolders(this.copyDestinationFolder);
+        },
+        closeCopyDialog() {
+          if (this.copyStarting) return;
+          this.copyDestinationVisible = false;
+          this.resetCopySelection();
+        },
+        async navigateCopyDestination(name) {
+          if (name === '..') {
+            const parts = this.copyDestinationFolder.replace(/\/$/, '').split('/');
+            parts.pop();
+            this.copyDestinationFolder = parts.join('/') || '/';
+          } else {
+            this.copyDestinationFolder = this.copyDestinationFolder.replace(/\/$/, '') + '/' + name;
+          }
+          await this.loadCopyDestinationFolders(this.copyDestinationFolder);
+        },
+        async startCopy() {
+          if (this.copyStarting || !this.copySourceItem || !this.copySourceItem.n) return;
+          this.copyStarting = true;
+          this.copyLastNotifiedStatus = '';
+          try {
+            if (this.copyStatusTerminal()) await this.resetCopyStatus();
+            const endpoint = this.copyOperation === 'move' ? '/move_start.cgi' : '/copy_start.cgi';
+            const operationLabel = this.copyOperationLabel();
+            const res = await fetch(`${endpoint}?srcFolder=${encodeURIComponent(this.copySourceFolder || '/')}` +
+              `&src=${encodeURIComponent(this.copySourceItem.n)}` +
+              `&dstFolder=${encodeURIComponent(this.copyDestinationFolder || '/')}`);
+            const result = await res.json();
+            if (result.error) {
+              this.showBanner(`${operationLabel} failed to start: ` + result.error, 'error');
+              return;
+            }
+            this.applyCopyStatus(result);
+            this.copyDestinationVisible = false;
+            this.copyProgressVisible = true;
+            this.resetCopySelection();
+            this.scheduleCopyPoll();
+          } catch (_) {
+            this.showBanner(`${this.copyOperationLabel()} failed to start`, 'error');
+          } finally {
+            this.copyStarting = false;
+          }
+        },
+        async cancelCopy() {
+          if (!this.copyStatusActive() || this.copyCancelling) return;
+          this.copyCancelling = true;
+          try {
+            const res = await fetch('/copy_cancel.cgi');
+            const result = await res.json();
+            if (result.error) {
+              this.showBanner(`Cancel ${this.copyOperationLower(this.copyStatus.operation)} failed: ` + result.error, 'error');
+              return;
+            }
+            this.applyCopyStatus(result);
+            this.scheduleCopyPoll();
+          } catch (_) {
+            this.showBanner(`Cancel ${this.copyOperationLower(this.copyStatus.operation)} failed`, 'error');
+          } finally {
+            this.copyCancelling = false;
+          }
+        },
+        async closeCopyProgress() {
+          if (this.copyStatusActive()) return;
+          await this.resetCopyStatus();
+        },
+        async pollCopyStatus(resumeOnly = false) {
+          this.clearCopyPollTimer();
+          try {
+            const res = await fetch('/copy_status.cgi');
+            const result = await res.json();
+            if (result.error) {
+              if (!resumeOnly) this.showBanner('Copy status failed: ' + result.error, 'error');
+              return;
+            }
+            this.applyCopyStatus(result);
+            if (resumeOnly && !this.copyStatusActive()) return;
+            if (this.copyStatusActive()) {
+              this.copyProgressVisible = true;
+              this.scheduleCopyPoll();
+              return;
+            }
+            if (this.copyStatusTerminal()) {
+              this.copyProgressVisible = true;
+              if (this.copyLastNotifiedStatus !== this.copyStatus.status) {
+                const operationLabel = this.copyOperationLabel(this.copyStatus.operation);
+                if (this.copyStatus.status === 'completed') {
+                  this.showBanner(`${operationLabel} completed.`, 'success');
+                  this.load(0);
+                } else if (this.copyStatus.status === 'cancelled') {
+                  this.showBanner(`${operationLabel} cancelled.`, 'warning');
+                  this.load(0);
+                } else {
+                  this.showBanner(`${operationLabel} failed: ` + (this.copyStatus.error || 'unknown error'), 'error');
+                }
+                this.copyLastNotifiedStatus = this.copyStatus.status;
+              }
+            }
+          } catch (_) {
+            if (!resumeOnly) this.showBanner('Copy status failed', 'error');
+          }
+        },
         renameFile() {
           const newName = prompt('New name for ' + this.detailFile.n, this.detailFile.n);
           if (!newName || newName === this.detailFile.n) return;
@@ -325,12 +747,14 @@
           this.newDiskType = this.newDiskType || '720KB';
           this.newDiskLabel = this.sanitizeDiskLabel(this.newDiskLabel || '');
           this.newDiskFileName = this.sanitizeDiskFileName(this.newDiskFileName || '');
+          this.newDiskExtension = this.newDiskExtension === 'st.rw' ? 'st.rw' : 'st';
           this.diskMenuVisible = true;
         },
         resetCreateDiskForm() {
           this.newDiskType = '720KB';
           this.newDiskLabel = '';
           this.newDiskFileName = '';
+          this.newDiskExtension = 'st';
           this.creatingDisk = false;
         },
         closeCreateDiskMenu() {
@@ -354,6 +778,28 @@
           if (this.returningToBooster) return;
           this.boosterConfirmVisible = false;
         },
+        clearBoosterPollTimer() {
+          if (this.boosterPollTimer) {
+            clearTimeout(this.boosterPollTimer);
+            this.boosterPollTimer = null;
+          }
+        },
+        scheduleBoosterCheck(delay = 5000) {
+          this.clearBoosterPollTimer();
+          this.boosterPollTimer = setTimeout(() => this.checkBoosterReady(), delay);
+        },
+        async checkBoosterReady() {
+          try {
+            const res = await fetch('/mngr_home.shtml', { cache: 'no-store' });
+            if (res.ok) {
+              window.location.href = '/mngr_home.shtml';
+              return;
+            }
+          } catch (_) {
+            // Ignore polling failures while Booster is still starting.
+          }
+          this.scheduleBoosterCheck(5000);
+        },
         bannerIconClass() {
           switch (this.bannerType) {
             case 'success': return 'fas fa-check-circle banner-icon';
@@ -366,18 +812,23 @@
           if (this.returningToBooster) return;
           this.boosterConfirmVisible = false;
           this.returningToBooster = true;
-          this.showBanner('Returning to Booster...', 'info');
+          this.boosterLaunchingVisible = true;
           try {
-            const res = await fetch('/booster.cgi');
-            const result = await res.json();
-            if (result.error) {
-              this.returningToBooster = false;
-              this.showBanner('Return to Booster failed: ' + result.error, 'error');
+            const res = await fetch('/booster.cgi', { cache: 'no-store' });
+            if (res.ok) {
+              const result = await res.json();
+              if (result.error) {
+                this.returningToBooster = false;
+                this.boosterLaunchingVisible = false;
+                this.showBanner('Return to Booster failed: ' + result.error, 'error');
+                return;
+              }
             }
           } catch (_) {
-            // Ignore network failures here; the device may already be switching
-            // to Booster mode.
+            // Ignore launch request failures here; the device may already be
+            // switching to Booster mode.
           }
+          this.scheduleBoosterCheck(5000);
         },
         sanitizeDiskLabel(value) {
           let base = '';
@@ -402,7 +853,8 @@
         },
         sanitizeDiskFileName(value) {
           let out = String(value || '').replace(/[\/\\:\x00-\x1F]/g, '').trim();
-          if (/\.st$/i.test(out)) out = out.slice(0, -3);
+          if (/\.st\.rw$/i.test(out)) out = out.slice(0, -6);
+          else if (/\.st$/i.test(out)) out = out.slice(0, -3);
           if (out.length > 96) out = out.slice(0, 96);
           while (out.endsWith(' ') || out.endsWith('.')) {
             out = out.slice(0, -1);
@@ -426,9 +878,12 @@
             default: return '';
           }
         },
+        diskFileExtension() {
+          return this.newDiskExtension === 'st.rw' ? '.st.rw' : '.st';
+        },
         diskFilePreview() {
           const name = this.sanitizeDiskFileName(this.newDiskFileName);
-          return name ? `${name}.ST` : 'Enter file name';
+          return name ? `${name}${this.diskFileExtension()}` : 'Enter file name';
         },
         async createBlankDisk() {
           if (this.creatingDisk) return;
@@ -447,7 +902,8 @@
             const res = await fetch(`/mkst.cgi?folder=${encodeURIComponent(this.folder)}` +
               `&type=${encodeURIComponent(this.newDiskType)}` +
               `&name=${encodeURIComponent(this.newDiskFileName)}` +
-              `&label=${encodeURIComponent(this.newDiskLabel)}`);
+              `&label=${encodeURIComponent(this.newDiskLabel)}` +
+              `&ext=${encodeURIComponent(this.newDiskExtension)}`);
             const result = await res.json();
             if (result.error) {
               this.showBanner('Create blank disk failed: ' + result.error, 'error');
@@ -569,6 +1025,10 @@
           <span x-text="(detailFile.a & 0x01) ? 'Writable' : 'Read-only'"></span>
         </button>
         <!-- File operations -->
+        <button class="pure-button" x-show="canConvertFileItem(detailFile)" @click="openConvertDialog(detailFile)"
+          x-text="convertActionLabelForName(detailFile.n)"></button>
+        <button class="pure-button" @click="openCopyDialog(detailFile)">Copy</button>
+        <button class="pure-button" @click="openMoveDialog(detailFile)">Move</button>
         <button class="pure-button pure-button-primary" @click="renameFile()">Rename</button>
         <button class="pure-button pure-button-success" @click="downloadFile()">Download</button>
         <button class="pure-button pure-button-danger" @click="deleteFile()">Delete</button>
@@ -576,10 +1036,25 @@
       </div>
     </div>
   </div>
+  <!-- Floppy image convert modal -->
+  <div x-show="convertDialogVisible" x-cloak class="modal">
+    <div class="modal-overlay" @click="closeConvertDialog()"></div>
+    <div class="modal-content convert-modal">
+      <h3 x-text="convertDialogTitle()"></h3>
+      <p><strong>Source:</strong> <code x-text="convertSourcePathPreview()"></code></p>
+      <p><strong>Target:</strong> <code x-text="convertTargetPathPreview()"></code></p>
+      <p class="copy-modal-help" x-text="convertDialogHelp()"></p>
+      <div class="modal-buttons">
+        <button type="button" class="pure-button" :disabled="convertingDisk" @click="closeConvertDialog()">Cancel</button>
+        <button type="button" class="pure-button pure-button-primary" :disabled="convertingDisk"
+          @click="startConvertDisk()" x-text="convertingDisk ? 'Converting…' : 'Convert'"></button>
+      </div>
+    </div>
+  </div>
   <!-- Blank disk creator modal -->
   <div x-show="diskMenuVisible" class="detail-modal" x-cloak @click.self="closeCreateDiskMenu()">
     <div class="detail-modal-content disk-modal-content">
-      <h3>Create Blank .ST</h3>
+      <h3>Create Blank ST Image</h3>
       <div class="disk-size-grid">
         <button type="button" class="disk-size-option" :class="{active: newDiskType === '360KB'}" @click="newDiskType = '360KB'">
           <strong>360KB (DS)</strong>
@@ -602,13 +1077,30 @@
       <input id="diskLabelInput" class="disk-label-input" type="text" maxlength="12" placeholder="DISK.001"
         x-model="newDiskLabel" @input="newDiskLabel = sanitizeDiskLabel(newDiskLabel)" />
       <p class="disk-field-help">Optional. Old FAT-style 8.3 uppercase with a dot, for example <code>DISK.001</code>.</p>
+      <fieldset class="disk-format-group">
+        <legend class="disk-field-label">File extension</legend>
+        <label class="disk-format-option" :class="{active: newDiskExtension === 'st'}">
+          <input type="radio" name="diskExt" value="st" x-model="newDiskExtension" />
+          <span>
+            <strong>.st</strong>
+            <small>Read-only in the Multidrive Emulator.</small>
+          </span>
+        </label>
+        <label class="disk-format-option" :class="{active: newDiskExtension === 'st.rw'}">
+          <input type="radio" name="diskExt" value="st.rw" x-model="newDiskExtension" />
+          <span>
+            <strong>.st.rw</strong>
+            <small>Read-write in the Multidrive Emulator.</small>
+          </span>
+        </label>
+      </fieldset>
       <label for="diskFileNameInput" class="disk-field-label">File name</label>
       <div class="disk-file-input-group">
         <input id="diskFileNameInput" class="disk-label-input disk-file-input" type="text" maxlength="96" placeholder="My Blank Disk"
           x-model="newDiskFileName" @input="newDiskFileName = sanitizeDiskFileName(newDiskFileName)" />
-        <span class="disk-fixed-ext">.ST</span>
+        <span class="disk-fixed-ext" x-text="diskFileExtension()"></span>
       </div>
-      <p class="disk-field-help">Required. Long file names are allowed. The extension is always <code>.ST</code>.</p>
+      <p class="disk-field-help">Required. Long file names are allowed. The selected extension is appended automatically.</p>
       <div class="disk-preview-row">
         <span>Geometry</span>
         <strong x-text="diskTypeGeometry(newDiskType)"></strong>
@@ -628,7 +1120,76 @@
       <div class="disk-modal-actions">
         <button class="pure-button" @click="closeCreateDiskMenu()">Cancel</button>
         <button class="pure-button pure-button-primary" :disabled="creatingDisk || !fileNameValid() || !volumeLabelValid()" @click="createBlankDisk()"
-          x-text="creatingDisk ? 'Creating…' : 'Create .ST'"></button>
+          x-text="creatingDisk ? 'Creating…' : 'Create image'"></button>
+      </div>
+    </div>
+  </div>
+  <!-- Copy destination modal -->
+  <div x-show="copyDestinationVisible" x-cloak class="modal">
+    <div class="modal-overlay" @click="closeCopyDialog()"></div>
+    <div class="modal-content copy-destination-modal">
+      <h3 x-text="`${copyOperationLabel()} To...`"></h3>
+      <p><strong>Source:</strong> <code x-text="copySourcePathPreview()"></code></p>
+      <p><strong>Destination folder:</strong> <code x-text="copyDestinationFolder || '/'"></code></p>
+      <p><strong>Target:</strong> <code x-text="copyTargetPathPreview()"></code></p>
+      <ul class="folder-list">
+        <template x-if="copyDestinationLoading">
+          <li class="folder-loading-item">
+            <span><i class="fas fa-spinner fa-spin"></i> Loading folders…</span>
+          </li>
+        </template>
+        <template x-for="f in (copyDestinationLoading ? [] : copyDestinationList)" :key="f">
+          <li>
+            <button type="button" class="pure-button" @click="navigateCopyDestination(f)">
+              <span x-text="f"></span>
+            </button>
+          </li>
+        </template>
+      </ul>
+      <p class="copy-modal-help" x-text="`Choose the destination folder, then confirm to start the ${copyOperationLower()}.`"></p>
+      <div class="modal-buttons">
+        <button type="button" class="pure-button" @click="closeCopyDialog()">Cancel</button>
+        <button type="button" class="pure-button pure-button-primary" :disabled="copyStarting || copyDestinationLoading"
+          @click="startCopy()" x-text="copyStarting ? 'Starting…' : `${copyOperationLabel()} Here`"></button>
+      </div>
+    </div>
+  </div>
+  <!-- Copy progress modal -->
+  <div x-show="copyProgressVisible" class="upload-modal" x-cloak>
+    <div class="upload-modal-content copy-progress-content">
+      <h3 x-text="copyProgressHeading()"></h3>
+      <p class="copy-progress-path"><strong>Source:</strong> <code x-text="copyStatus.src"></code></p>
+      <p class="copy-progress-path"><strong>Destination:</strong> <code x-text="copyStatus.dst"></code></p>
+      <p class="copy-progress-path" x-show="copyStatus.current"><strong>Current:</strong> <code x-text="copyStatus.current"></code></p>
+      <template x-if="copyStatus.status === 'scanning'">
+        <div>
+          <progress class="pure-progress" max="100" style="width:100%;"></progress>
+          <p class="copy-summary-line">Scanning source tree to calculate totals…</p>
+        </div>
+      </template>
+      <template x-if="copyStatus.status !== 'scanning'">
+        <div>
+          <progress class="pure-progress" max="100" x-bind:value="copyStatus.percent" style="width:100%;"></progress>
+          <p class="copy-summary-line"><strong x-text="copyStatus.percent"></strong>% complete</p>
+        </div>
+      </template>
+      <div class="copy-summary-grid">
+        <div><span>Files</span><strong x-text="`${copyStatus.filesDone} / ${copyStatus.filesTotal}`"></strong></div>
+        <div><span>Folders</span><strong x-text="`${copyStatus.dirsDone} / ${copyStatus.dirsTotal}`"></strong></div>
+        <div><span>Bytes</span><strong x-text="`${formatBytes(copyStatus.bytesDone)} / ${formatBytes(copyStatus.bytesTotal)}`"></strong></div>
+        <div><span>Current file</span><strong x-text="`${formatBytes(copyStatus.currentFileDone)} / ${formatBytes(copyStatus.currentFileSize)}`"></strong></div>
+      </div>
+      <p class="text-error" x-show="copyStatus.status === 'failed'"
+        x-text="copyStatus.error || `${copyOperationLabel(copyStatus.operation)} failed.`"></p>
+      <p class="text-warning" x-show="copyStatus.status === 'cancelled'"
+        x-text="`${copyOperationLabel(copyStatus.operation)} cancelled.`"></p>
+      <div class="modal-buttons">
+        <button type="button" class="pure-button pure-button-warning"
+          x-show="copyStatusActive()"
+          :disabled="copyCancelling || copyStatus.cancelRequested"
+          @click="cancelCopy()"
+          x-text="copyStatus.cancelRequested ? 'Cancelling…' : `Cancel ${copyOperationLabel(copyStatus.operation)}`"></button>
+        <button type="button" class="pure-button" x-show="copyStatusTerminal()" @click="closeCopyProgress()">Close</button>
       </div>
     </div>
   </div>
@@ -694,7 +1255,7 @@
       <button class="pure-button pure-button-primary" @click="$refs.fileInput.click()">Upload Files</button>
       <button class="pure-button" @click="uploadUrl()">Upload from URL</button>
       <button class="pure-button" @click="createFolder()">New Folder</button>
-      <button class="pure-button" @click="openCreateDiskMenu()">Blank .ST</button>
+      <button class="pure-button" @click="openCreateDiskMenu()">Blank ST Image</button>
     </div>
 
     <table class="pure-table pure-table-horizontal" style="margin-top:1rem; width:100%;">
@@ -707,14 +1268,27 @@
         </tr>
       </thead>
       <tbody>
+        <template x-if="folderLoading">
+          <tr>
+            <td colspan="4" class="folder-loading-cell">
+              <i class="fas fa-spinner fa-spin"></i>
+              <span>Loading folder…</span>
+            </td>
+          </tr>
+        </template>
         <!-- Go up row -->
-        <template x-if="folder !== '/'">
+        <template x-if="!folderLoading && folder !== '/'">
           <tr class="clickable-row" @click="navigate('..')">
             <td colspan="3"><i class="fas fa-level-up-alt"></i> ..</td>
             <td></td>
           </tr>
         </template>
-        <template x-for="(item,idx) in itemsSorted()" :key="idx">
+        <template x-if="!folderLoading && items.length === 0">
+          <tr>
+            <td colspan="4" class="folder-loading-cell">This folder is empty.</td>
+          </tr>
+        </template>
+        <template x-for="(item,idx) in (folderLoading ? [] : itemsSorted())" :key="idx">
           <tr class="clickable-row" :class="{'hidden-row': (item.a & 0x02), 'readonly-row': (item.a & 0x01)}"
             @click="item.a & 0x10 ? navigate(item.n) : showDetails(item)">
             <td>
@@ -727,6 +1301,12 @@
             <td x-text="formatTs(item.t)"></td>
             <td>
               <span class="action-icons">
+                <i class="fas fa-retweet convert-icon"
+                  :class="{ 'convert-icon-disabled': !canConvertFileItem(item) }"
+                  :title="canConvertFileItem(item) ? convertTooltipForName(item.n) : 'Convert floppy image unavailable for this file type'"
+                  @click.stop="openConvertDialog(item)"></i>
+                <i class="fas fa-copy copy-icon" title="Copy" @click.stop="openCopyDialog(item)"></i>
+                <i class="fas fa-arrow-right move-icon" title="Move" @click.stop="openMoveDialog(item)"></i>
                 <i class="fas fa-edit rename-icon" @click.stop="renameItem(item)"></i>
                 <i class="fas fa-trash delete-icon" title="Delete (Shift-click to skip confirmation)"
                   @click.stop="deleteItem(item, $event)"></i>
@@ -748,6 +1328,19 @@
         <button type="button" class="pure-button" @click="closeBoosterConfirm()">Cancel</button>
         <button type="button" class="pure-button pure-button-warning" :disabled="returningToBooster"
           @click="returnToBooster()" x-text="returningToBooster ? 'Returning…' : 'Return to Booster'"></button>
+      </div>
+    </div>
+  </div>
+  <div x-show="boosterLaunchingVisible" x-cloak class="modal">
+    <div class="modal-overlay"></div>
+    <div class="modal-content booster-confirm-modal booster-launch-modal">
+      <div class="booster-launch-content">
+        <i class="fas fa-spinner fa-spin modal-info-icon booster-launch-icon"></i>
+        <div>
+          <h3>Launching Booster...</h3>
+          <p>Please wait while the device switches back to Booster mode.</p>
+          <p>The page will redirect automatically when Booster is ready.</p>
+        </div>
       </div>
     </div>
   </div>
