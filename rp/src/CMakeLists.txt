@@ -140,6 +140,7 @@ pico_generate_pio_header(${PROJECT_NAME} ${CMAKE_CURRENT_LIST_DIR}/romemul.pio)
 target_sources(${PROJECT_NAME} PRIVATE
         aconfig.c
         blink.c
+        copy.c
         display.c
         display_term.c
         display_mngr.c
@@ -154,6 +155,7 @@ target_sources(${PROJECT_NAME} PRIVATE
         romemul.c
         sdcard.c
         select.c
+        floppy.c
         usb_descriptors.c
         usb_mass.c
         tusb_config.h
