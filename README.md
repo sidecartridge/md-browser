@@ -136,6 +136,8 @@ To create a new empty floppy image:
 
 Use `.st` for a normal floppy image. Use `.st.rw` if you want to edit the image later inside the web interface or with the Multidrive Emulator.
 
+![Create Blank ST Image](/BROWSER-FILEMANAGER-BLANK-ST.png)
+
 #### Converting MSA and ST Images
 
 If you have an `.MSA` or `.ST` file, use the **convert** icon to create the other format automatically.
@@ -159,6 +161,8 @@ If the image is a writable `.st.rw` image, you can also:
 * Import files and folders from the microSD card into the image
 
 You can also copy files or folders from the image back to the microSD card.
+
+![Browsing Inside an ST Image](/BROWSER-FILEMANAGER-INSIDE-IMAGE.png)
 
 #### Uploading Files
 
