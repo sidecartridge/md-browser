@@ -26,6 +26,11 @@ typedef enum {
   COPY_SOURCE_IMAGE
 } copy_source_t;
 
+typedef enum {
+  COPY_DEST_HOST = 0,
+  COPY_DEST_IMAGE
+} copy_destination_t;
+
 typedef struct {
   DIR dir;
   size_t src_len;
@@ -41,11 +46,13 @@ typedef struct {
 typedef struct {
   copy_info_t info;
   copy_source_t source;
+  copy_destination_t destination;
   copy_host_stack_frame_t *host_stack;
   copy_image_stack_frame_t *image_stack;
   FILINFO *entry_info;
   stfs_dirent_t *image_entry_info;
   char source_path[COPY_MAX_PATH_LEN];
+  char dest_path[COPY_MAX_PATH_LEN];
   char image_file_path[COPY_MAX_PATH_LEN];
   char scan_path[COPY_MAX_PATH_LEN];
   char copy_src_path[COPY_MAX_PATH_LEN];
@@ -54,6 +61,7 @@ typedef struct {
   FIL dst_file;
   stfs_t image_fs;
   stfs_file_t image_src_file;
+  stfs_write_file_t image_dst_file;
   bool image_fs_open;
   bool scan_initialized;
   bool copy_initialized;
@@ -61,13 +69,37 @@ typedef struct {
   bool src_file_open;
   bool image_src_file_open;
   bool dst_file_open;
+  bool image_dst_file_open;
   uint8_t depth;
   size_t current_file_src_parent_len;
   size_t current_file_dst_parent_len;
   uint8_t *buffer;
 } copy_job_t;
 
+static bool copy_copy_string(char *dst, size_t dst_len, const char *src);
+
 static copy_job_t copyJob = {0};
+static FRESULT copyLastStartError = FR_OK;
+static char copyLastStartErrorMessage[COPY_ERROR_MSG_LEN] = {0};
+
+static void copy_clear_start_error(void) {
+  copyLastStartError = FR_OK;
+  copyLastStartErrorMessage[0] = '\0';
+}
+
+static void copy_set_start_error(FRESULT fr, const char *message) {
+  copyLastStartError = fr;
+  if (!message) {
+    copyLastStartErrorMessage[0] = '\0';
+    return;
+  }
+
+  if (!copy_copy_string(copyLastStartErrorMessage,
+                        sizeof(copyLastStartErrorMessage), message)) {
+    snprintf(copyLastStartErrorMessage, sizeof(copyLastStartErrorMessage),
+             "start failed (%d)", (int)fr);
+  }
+}
 
 static bool copy_copy_string(char *dst, size_t dst_len, const char *src) {
   size_t src_len = 0;
@@ -82,6 +114,10 @@ static bool copy_copy_string(char *dst, size_t dst_len, const char *src) {
 
 static bool copy_is_image_source(void) {
   return copyJob.source == COPY_SOURCE_IMAGE;
+}
+
+static bool copy_is_image_dest(void) {
+  return copyJob.destination == COPY_DEST_IMAGE;
 }
 
 static void copy_restore_path(char *path, size_t path_len) {
@@ -103,6 +139,59 @@ static bool copy_append_name(char *path, size_t path_len, const char *name,
 
   *new_len = len + (size_t)written;
   return true;
+}
+
+static bool copy_split_parent_child(const char *path, char *parent,
+                                    size_t parent_len, char *name,
+                                    size_t name_len) {
+  const char *slash = NULL;
+  size_t child_len = 0u;
+  size_t parent_size = 0u;
+
+  if (!path || !parent || !name || path[0] != '/') return false;
+  if (strcmp(path, "/") == 0) return false;
+
+  slash = strrchr(path, '/');
+  if (!slash) return false;
+
+  child_len = strlen(slash + 1u);
+  if (child_len == 0u || child_len >= name_len) return false;
+
+  parent_size = (size_t)(slash - path);
+  if (parent_size == 0u) {
+    if (!copy_copy_string(parent, parent_len, "/")) return false;
+  } else {
+    if (parent_size >= parent_len) return false;
+    memcpy(parent, path, parent_size);
+    parent[parent_size] = '\0';
+  }
+
+  memcpy(name, slash + 1u, child_len + 1u);
+  return true;
+}
+
+static bool copy_resolve_image_child_path(const char *parent_inner_path,
+                                          const char *source_name,
+                                          char *resolved_path,
+                                          size_t resolved_path_len) {
+  char resolved_name[STFS_MAX_NAME_LEN];
+  bool renamed = false;
+  size_t ignored_len = 0u;
+  FRESULT fr = FR_OK;
+
+  if (!parent_inner_path || !source_name || !resolved_path) return false;
+
+  fr = stfs_resolve_sfn_name(&copyJob.image_fs, parent_inner_path, source_name,
+                             resolved_name, sizeof(resolved_name), &renamed);
+  if (fr != FR_OK) return false;
+  (void)renamed;
+
+  if (!copy_copy_string(resolved_path, resolved_path_len, parent_inner_path)) {
+    return false;
+  }
+
+  return copy_append_name(resolved_path, resolved_path_len, resolved_name,
+                          &ignored_len);
 }
 
 static const char *copy_basename(const char *path) {
@@ -145,12 +234,21 @@ static bool copy_set_current_image_paths(const char *inner_src,
                           sizeof(copyJob.info.current_dst_path), dst_path);
 }
 
+static bool copy_set_current_host_to_image_paths(const char *src_path,
+                                                 const char *inner_dst) {
+  return copy_copy_string(copyJob.info.current_path,
+                          sizeof(copyJob.info.current_path), src_path) &&
+         copy_format_image_display_path(copyJob.info.current_dst_path,
+                                        sizeof(copyJob.info.current_dst_path),
+                                        copyJob.image_file_path, inner_dst);
+}
+
 static void copy_clear_current_paths(void) {
   copyJob.info.current_path[0] = '\0';
   copyJob.info.current_dst_path[0] = '\0';
 }
 
-static void copy_close_active_file_handles(void) {
+static void copy_abort_active_file_handles(void) {
   if (copyJob.src_file_open) {
     (void)f_close(&copyJob.src_file);
     copyJob.src_file_open = false;
@@ -162,6 +260,10 @@ static void copy_close_active_file_handles(void) {
   if (copyJob.dst_file_open) {
     (void)f_close(&copyJob.dst_file);
     copyJob.dst_file_open = false;
+  }
+  if (copyJob.image_dst_file_open) {
+    (void)stfs_close_write_file(&copyJob.image_dst_file, false);
+    copyJob.image_dst_file_open = false;
   }
   copyJob.file_copy_active = false;
   copyJob.info.current_file_size = 0;
@@ -277,7 +379,7 @@ cleanup:
 }
 
 static void copy_release_resources(void) {
-  copy_close_active_file_handles();
+  copy_abort_active_file_handles();
   copy_close_stack_dirs();
   if (copyJob.image_fs_open) {
     stfs_close(&copyJob.image_fs);
@@ -305,16 +407,22 @@ static void copy_reset_job(void) {
 
 static void copy_finish(copy_status_t status, FRESULT fr, const char *message,
                         bool cleanup_dst) {
-  copy_release_resources();
+  copy_abort_active_file_handles();
+  copy_close_stack_dirs();
 
-  if (cleanup_dst) {
-    FRESULT cleanup_result = copy_remove_tree(copyJob.info.dst_path);
+  if (cleanup_dst && copyJob.dest_path[0] != '\0') {
+    FRESULT cleanup_result =
+        copy_is_image_dest() && copyJob.image_fs_open
+            ? stfs_delete_tree(&copyJob.image_fs, copyJob.dest_path)
+            : copy_remove_tree(copyJob.dest_path);
     if (cleanup_result != FR_OK && cleanup_result != FR_NO_FILE &&
         cleanup_result != FR_NO_PATH) {
-      DPRINTF("Copy cleanup failed for %s: %d\n", copyJob.info.dst_path,
+      DPRINTF("Copy cleanup failed for %s: %d\n", copyJob.dest_path,
               (int)cleanup_result);
     }
   }
+
+  copy_release_resources();
 
   copyJob.info.status = status;
   copyJob.info.last_error = fr;
@@ -427,17 +535,44 @@ static bool copy_open_current_host_file(uint64_t file_size) {
   }
   copyJob.src_file_open = true;
 
-  fr = f_open(&copyJob.dst_file, copyJob.copy_dst_path, FA_CREATE_NEW | FA_WRITE);
-  if (fr != FR_OK) {
-    copy_fail(fr, "cannot create destination file");
-    return false;
+  if (copy_is_image_dest()) {
+    char parent_path[COPY_MAX_PATH_LEN];
+    char name[STFS_MAX_NAME_LEN];
+
+    if (!copyJob.entry_info ||
+        !copy_split_parent_child(copyJob.copy_dst_path, parent_path,
+                                 sizeof(parent_path), name, sizeof(name))) {
+      copy_fail(FR_INVALID_NAME, "invalid image destination path");
+      return false;
+    }
+
+    fr = stfs_create_file(&copyJob.image_fs, parent_path, name,
+                          (DWORD)file_size,
+                          (BYTE)(copyJob.entry_info->fattrib & ~AM_DIR),
+                          copyJob.entry_info->fdate, copyJob.entry_info->ftime,
+                          &copyJob.image_dst_file);
+    if (fr != FR_OK) {
+      copy_fail(fr, "cannot create destination file");
+      return false;
+    }
+    copyJob.image_dst_file_open = true;
+    copy_set_current_host_to_image_paths(copyJob.copy_src_path,
+                                         copyJob.copy_dst_path);
+  } else {
+    fr =
+        f_open(&copyJob.dst_file, copyJob.copy_dst_path, FA_CREATE_NEW | FA_WRITE);
+    if (fr != FR_OK) {
+      copy_fail(fr, "cannot create destination file");
+      return false;
+    }
+
+    copyJob.dst_file_open = true;
+    copy_set_current_paths(copyJob.copy_src_path, copyJob.copy_dst_path);
   }
 
-  copyJob.dst_file_open = true;
   copyJob.file_copy_active = true;
   copyJob.info.current_file_size = file_size;
   copyJob.info.current_file_done = 0u;
-  copy_set_current_paths(copyJob.copy_src_path, copyJob.copy_dst_path);
   return true;
 }
 
@@ -465,12 +600,66 @@ static bool copy_open_current_image_file(uint64_t file_size) {
 }
 
 static bool copy_begin_copy_host(void) {
+  if (copy_is_image_dest()) {
+    FRESULT fr = FR_OK;
+
+    if (!copy_copy_string(copyJob.copy_src_path, sizeof(copyJob.copy_src_path),
+                          copyJob.source_path) ||
+        !copy_copy_string(copyJob.copy_dst_path, sizeof(copyJob.copy_dst_path),
+                          copyJob.dest_path)) {
+      copy_fail(FR_INVALID_NAME, "path too long");
+      return false;
+    }
+
+    copyJob.depth = 0u;
+    copyJob.copy_initialized = true;
+
+    if (copyJob.info.src_is_dir) {
+      char parent_path[COPY_MAX_PATH_LEN];
+      char name[STFS_MAX_NAME_LEN];
+
+      if (!copy_split_parent_child(copyJob.copy_dst_path, parent_path,
+                                   sizeof(parent_path), name,
+                                   sizeof(name))) {
+        copy_fail(FR_INVALID_NAME, "invalid image destination path");
+        return false;
+      }
+
+      fr = stfs_mkdir(&copyJob.image_fs, parent_path, name,
+                      (BYTE)(copyJob.entry_info->fattrib & ~AM_DIR),
+                      copyJob.entry_info->fdate, copyJob.entry_info->ftime);
+      if (fr != FR_OK) {
+        copy_fail(fr, "cannot create destination folder");
+        return false;
+      }
+
+      copyJob.info.dirs_done = 1u;
+      copy_set_current_host_to_image_paths(copyJob.info.src_path,
+                                           copyJob.copy_dst_path);
+
+      fr = f_opendir(&copyJob.host_stack[0].dir, copyJob.copy_src_path);
+      if (fr != FR_OK) {
+        copy_fail(fr, "cannot open source folder");
+        return false;
+      }
+
+      copyJob.host_stack[0].src_len = strlen(copyJob.copy_src_path);
+      copyJob.host_stack[0].dst_len = strlen(copyJob.copy_dst_path);
+      copyJob.depth = 1u;
+      return true;
+    }
+
+    copyJob.current_file_src_parent_len = strlen(copyJob.copy_src_path);
+    copyJob.current_file_dst_parent_len = strlen(copyJob.copy_dst_path);
+    return copy_open_current_host_file(copyJob.info.bytes_total);
+  }
+
   FRESULT fr = FR_OK;
 
   if (!copy_copy_string(copyJob.copy_src_path, sizeof(copyJob.copy_src_path),
                         copyJob.source_path) ||
       !copy_copy_string(copyJob.copy_dst_path, sizeof(copyJob.copy_dst_path),
-                        copyJob.info.dst_path)) {
+                        copyJob.dest_path)) {
     copy_fail(FR_INVALID_NAME, "path too long");
     return false;
   }
@@ -511,7 +700,7 @@ static bool copy_begin_copy_image(void) {
   if (!copy_copy_string(copyJob.copy_src_path, sizeof(copyJob.copy_src_path),
                         copyJob.source_path) ||
       !copy_copy_string(copyJob.copy_dst_path, sizeof(copyJob.copy_dst_path),
-                        copyJob.info.dst_path)) {
+                        copyJob.dest_path)) {
     copy_fail(FR_INVALID_NAME, "path too long");
     return false;
   }
@@ -735,13 +924,28 @@ static bool copy_process_host_file_chunk(void) {
   }
 
   if (bytes_read == 0u) {
-    fr = f_sync(&copyJob.dst_file);
+    if (copy_is_image_dest()) {
+      fr = stfs_close_write_file(&copyJob.image_dst_file, true);
+      copyJob.image_dst_file_open = false;
+    } else {
+      fr = f_sync(&copyJob.dst_file);
+      if (fr == FR_OK) {
+        fr = f_close(&copyJob.dst_file);
+      }
+      copyJob.dst_file_open = false;
+    }
+    if (copyJob.src_file_open) {
+      (void)f_close(&copyJob.src_file);
+      copyJob.src_file_open = false;
+    }
     if (fr != FR_OK) {
       copy_fail(fr, "cannot flush destination file");
       return false;
     }
 
-    copy_close_active_file_handles();
+    copyJob.file_copy_active = false;
+    copyJob.info.current_file_size = 0u;
+    copyJob.info.current_file_done = 0u;
     copyJob.info.files_done++;
     if (copyJob.info.bytes_done > copyJob.info.bytes_total) {
       copyJob.info.bytes_done = copyJob.info.bytes_total;
@@ -757,7 +961,12 @@ static bool copy_process_host_file_chunk(void) {
     return true;
   }
 
-  fr = f_write(&copyJob.dst_file, copyJob.buffer, bytes_read, &bytes_written);
+  if (copy_is_image_dest()) {
+    fr = stfs_write_file(&copyJob.image_dst_file, copyJob.buffer, bytes_read,
+                         &bytes_written);
+  } else {
+    fr = f_write(&copyJob.dst_file, copyJob.buffer, bytes_read, &bytes_written);
+  }
   if (fr != FR_OK || bytes_written != bytes_read) {
     copy_fail(fr == FR_OK ? FR_DISK_ERR : fr, "cannot write destination file");
     return false;
@@ -784,8 +993,17 @@ static bool copy_process_image_file_chunk(void) {
       copy_fail(fr, "cannot flush destination file");
       return false;
     }
-
-    copy_close_active_file_handles();
+    if (copyJob.image_src_file_open) {
+      stfs_close_file(&copyJob.image_src_file);
+      copyJob.image_src_file_open = false;
+    }
+    if (copyJob.dst_file_open) {
+      (void)f_close(&copyJob.dst_file);
+      copyJob.dst_file_open = false;
+    }
+    copyJob.file_copy_active = false;
+    copyJob.info.current_file_size = 0u;
+    copyJob.info.current_file_done = 0u;
     copyJob.info.files_done++;
     if (copyJob.info.bytes_done > copyJob.info.bytes_total) {
       copyJob.info.bytes_done = copyJob.info.bytes_total;
@@ -865,11 +1083,30 @@ static bool copy_process_copy_host(void) {
     {
       size_t child_src_len = 0u;
       size_t child_dst_len = 0u;
+      char resolved_name[STFS_MAX_NAME_LEN];
 
       if (!copy_append_name(copyJob.copy_src_path, sizeof(copyJob.copy_src_path),
-                            fno->fname, &child_src_len) ||
-          !copy_append_name(copyJob.copy_dst_path, sizeof(copyJob.copy_dst_path),
-                            fno->fname, &child_dst_len)) {
+                            fno->fname, &child_src_len)) {
+        copy_fail(FR_INVALID_NAME, "path too long");
+        return false;
+      }
+
+      if (copy_is_image_dest()) {
+        FRESULT name_fr = stfs_resolve_sfn_name(&copyJob.image_fs,
+                                                copyJob.copy_dst_path, fno->fname,
+                                                resolved_name,
+                                                sizeof(resolved_name), NULL);
+        if (name_fr != FR_OK ||
+            !copy_append_name(copyJob.copy_dst_path,
+                              sizeof(copyJob.copy_dst_path), resolved_name,
+                              &child_dst_len)) {
+          copy_fail(name_fr == FR_OK ? FR_INVALID_NAME : name_fr,
+                    "cannot resolve image destination name");
+          return false;
+        }
+      } else if (!copy_append_name(copyJob.copy_dst_path,
+                                   sizeof(copyJob.copy_dst_path), fno->fname,
+                                   &child_dst_len)) {
         copy_fail(FR_INVALID_NAME, "path too long");
         return false;
       }
@@ -880,8 +1117,25 @@ static bool copy_process_copy_host(void) {
           return false;
         }
 
-        copy_set_current_paths(copyJob.copy_src_path, copyJob.copy_dst_path);
-        fr = f_mkdir(copyJob.copy_dst_path);
+        if (copy_is_image_dest()) {
+          char parent_path[COPY_MAX_PATH_LEN];
+          char name[STFS_MAX_NAME_LEN];
+
+          if (!copy_split_parent_child(copyJob.copy_dst_path, parent_path,
+                                       sizeof(parent_path), name,
+                                       sizeof(name))) {
+            copy_fail(FR_INVALID_NAME, "invalid image destination path");
+            return false;
+          }
+          copy_set_current_host_to_image_paths(copyJob.copy_src_path,
+                                               copyJob.copy_dst_path);
+          fr = stfs_mkdir(&copyJob.image_fs, parent_path, name,
+                          (BYTE)(fno->fattrib & ~AM_DIR), fno->fdate,
+                          fno->ftime);
+        } else {
+          copy_set_current_paths(copyJob.copy_src_path, copyJob.copy_dst_path);
+          fr = f_mkdir(copyJob.copy_dst_path);
+        }
         if (fr != FR_OK) {
           copy_fail(fr, "cannot create nested folder");
           return false;
@@ -1033,10 +1287,16 @@ static bool copy_start_host_internal(const char *src_path, const char *dst_path,
   FSIZE_t src_fsize = 0u;
   FRESULT fr = FR_OK;
 
+  copy_clear_start_error();
+
   if (!src_path || !dst_path || src_path[0] == '\0' || dst_path[0] == '\0') {
+    copy_set_start_error(FR_INVALID_PARAMETER, "invalid source or destination");
     return false;
   }
-  if (copy_is_active()) return false;
+  if (copy_is_active()) {
+    copy_set_start_error(FR_DENIED, "another copy or move is already active");
+    return false;
+  }
 
   copy_reset_job();
 
@@ -1044,31 +1304,39 @@ static bool copy_start_host_internal(const char *src_path, const char *dst_path,
                         src_path) ||
       !copy_copy_string(copyJob.info.src_path, sizeof(copyJob.info.src_path),
                         src_path) ||
+      !copy_copy_string(copyJob.dest_path, sizeof(copyJob.dest_path), dst_path) ||
       !copy_copy_string(copyJob.info.dst_path, sizeof(copyJob.info.dst_path),
                         dst_path)) {
+    copy_set_start_error(FR_INVALID_NAME, "source or destination path is too long");
     copy_reset_job();
     return false;
   }
 
   copyJob.source = COPY_SOURCE_HOST;
+  copyJob.destination = COPY_DEST_HOST;
   copyJob.host_stack = calloc(COPY_MAX_DIR_DEPTH, sizeof(*copyJob.host_stack));
   copyJob.buffer = malloc(COPY_CHUNK_SIZE);
   copyJob.entry_info = calloc(1, sizeof(*copyJob.entry_info));
   if (!copyJob.host_stack || !copyJob.buffer || !copyJob.entry_info) {
+    copy_set_start_error(FR_NOT_ENOUGH_CORE, "out of memory");
     copy_reset_job();
     return false;
   }
 
   fr = f_stat(copyJob.source_path, copyJob.entry_info);
   if (fr != FR_OK) {
+    copy_set_start_error(fr, "source not found");
     copy_reset_job();
     return false;
   }
   src_fattrib = copyJob.entry_info->fattrib;
   src_fsize = copyJob.entry_info->fsize;
 
-  fr = f_stat(copyJob.info.dst_path, copyJob.entry_info);
+  fr = f_stat(copyJob.dest_path, copyJob.entry_info);
   if (fr == FR_OK || (fr != FR_NO_FILE && fr != FR_NO_PATH)) {
+    copy_set_start_error(fr == FR_OK ? FR_EXIST : fr,
+                         fr == FR_OK ? "destination already exists"
+                                     : "destination check failed");
     copy_reset_job();
     return false;
   }
@@ -1085,16 +1353,122 @@ bool copy_start_move(const char *src_path, const char *dst_path) {
   return copy_start_host_internal(src_path, dst_path, COPY_OPERATION_MOVE);
 }
 
+bool copy_start_to_image(const char *src_path, const char *image_file_path,
+                         const char *image_dst_dir) {
+  FRESULT fr = FR_OK;
+  char resolved_name[STFS_MAX_NAME_LEN];
+  stfs_dirent_t image_dir_info = {0};
+  size_t ignored_len = 0u;
+
+  copy_clear_start_error();
+
+  if (!src_path || !image_file_path || !image_dst_dir || src_path[0] == '\0' ||
+      image_file_path[0] == '\0' || image_dst_dir[0] == '\0') {
+    copy_set_start_error(FR_INVALID_PARAMETER, "invalid source or image path");
+    return false;
+  }
+  if (copy_is_active()) {
+    copy_set_start_error(FR_DENIED, "another copy or move is already active");
+    return false;
+  }
+
+  copy_reset_job();
+
+  if (!copy_copy_string(copyJob.source_path, sizeof(copyJob.source_path),
+                        src_path) ||
+      !copy_copy_string(copyJob.info.src_path, sizeof(copyJob.info.src_path),
+                        src_path) ||
+      !copy_copy_string(copyJob.image_file_path,
+                        sizeof(copyJob.image_file_path), image_file_path)) {
+    copy_set_start_error(FR_INVALID_NAME, "source or image path is too long");
+    copy_reset_job();
+    return false;
+  }
+
+  copyJob.source = COPY_SOURCE_HOST;
+  copyJob.destination = COPY_DEST_IMAGE;
+  copyJob.host_stack = calloc(COPY_MAX_DIR_DEPTH, sizeof(*copyJob.host_stack));
+  copyJob.buffer = malloc(COPY_CHUNK_SIZE);
+  copyJob.entry_info = calloc(1, sizeof(*copyJob.entry_info));
+  if (!copyJob.host_stack || !copyJob.buffer || !copyJob.entry_info) {
+    copy_set_start_error(FR_NOT_ENOUGH_CORE, "out of memory");
+    copy_reset_job();
+    return false;
+  }
+
+  fr = f_stat(copyJob.source_path, copyJob.entry_info);
+  if (fr != FR_OK) {
+    copy_set_start_error(fr, "source not found");
+    copy_reset_job();
+    return false;
+  }
+
+  fr = stfs_open_rw(&copyJob.image_fs, copyJob.image_file_path);
+  if (fr != FR_OK) {
+    copy_set_start_error(fr, "image is not writable or not a FAT floppy");
+    copy_reset_job();
+    return false;
+  }
+  copyJob.image_fs_open = true;
+
+  fr = stfs_stat(&copyJob.image_fs, image_dst_dir, &image_dir_info);
+  if (fr != FR_OK ||
+      !(strcmp(image_dst_dir, "/") == 0 ||
+        (image_dir_info.attr & AM_DIR) != 0u)) {
+    copy_set_start_error(fr == FR_OK ? FR_NO_PATH : fr,
+                         "destination folder not found inside image");
+    copy_reset_job();
+    return false;
+  }
+
+  fr = stfs_resolve_sfn_name(&copyJob.image_fs, image_dst_dir,
+                             copy_basename(copyJob.source_path), resolved_name,
+                             sizeof(resolved_name), NULL);
+  if (fr != FR_OK) {
+    copy_set_start_error(fr, fr == FR_EXIST
+                                 ? "destination already exists inside image"
+                                 : fr == FR_INVALID_NAME
+                                       ? "source name cannot be converted to 8.3"
+                                       : "could not resolve destination name inside image");
+    copy_reset_job();
+    return false;
+  }
+  if (
+      !copy_copy_string(copyJob.dest_path, sizeof(copyJob.dest_path),
+                        image_dst_dir) ||
+      !copy_append_name(copyJob.dest_path, sizeof(copyJob.dest_path),
+                        resolved_name, &ignored_len) ||
+      !copy_format_image_display_path(copyJob.info.dst_path,
+                                      sizeof(copyJob.info.dst_path),
+                                      image_file_path, copyJob.dest_path)) {
+    copy_set_start_error(FR_INVALID_NAME,
+                         "destination path inside image is too long");
+    copy_reset_job();
+    return false;
+  }
+
+  copy_init_info(COPY_OPERATION_COPY,
+                 (copyJob.entry_info->fattrib & AM_DIR) != 0u,
+                 (uint64_t)copyJob.entry_info->fsize);
+  return true;
+}
+
 bool copy_start_from_image(const char *image_file_path,
                            const char *image_src_path, const char *dst_path) {
   FRESULT fr = FR_OK;
 
+  copy_clear_start_error();
+
   if (!image_file_path || !image_src_path || !dst_path ||
       image_file_path[0] == '\0' || image_src_path[0] == '\0' ||
       dst_path[0] == '\0') {
+    copy_set_start_error(FR_INVALID_PARAMETER, "invalid image or destination path");
     return false;
   }
-  if (copy_is_active()) return false;
+  if (copy_is_active()) {
+    copy_set_start_error(FR_DENIED, "another copy or move is already active");
+    return false;
+  }
 
   copy_reset_job();
 
@@ -1102,16 +1476,19 @@ bool copy_start_from_image(const char *image_file_path,
                         image_src_path) ||
       !copy_copy_string(copyJob.image_file_path,
                         sizeof(copyJob.image_file_path), image_file_path) ||
+      !copy_copy_string(copyJob.dest_path, sizeof(copyJob.dest_path), dst_path) ||
       !copy_copy_string(copyJob.info.dst_path, sizeof(copyJob.info.dst_path),
                         dst_path) ||
       !copy_format_image_display_path(copyJob.info.src_path,
                                       sizeof(copyJob.info.src_path),
                                       image_file_path, image_src_path)) {
+    copy_set_start_error(FR_INVALID_NAME, "image or destination path is too long");
     copy_reset_job();
     return false;
   }
 
   copyJob.source = COPY_SOURCE_IMAGE;
+  copyJob.destination = COPY_DEST_HOST;
   copyJob.image_stack =
       calloc(COPY_MAX_DIR_DEPTH, sizeof(*copyJob.image_stack));
   copyJob.buffer = malloc(COPY_CHUNK_SIZE);
@@ -1119,12 +1496,14 @@ bool copy_start_from_image(const char *image_file_path,
   copyJob.image_entry_info = calloc(1, sizeof(*copyJob.image_entry_info));
   if (!copyJob.image_stack || !copyJob.buffer || !copyJob.entry_info ||
       !copyJob.image_entry_info) {
+    copy_set_start_error(FR_NOT_ENOUGH_CORE, "out of memory");
     copy_reset_job();
     return false;
   }
 
   fr = stfs_open(&copyJob.image_fs, copyJob.image_file_path);
   if (fr != FR_OK) {
+    copy_set_start_error(fr, "image is not a browsable FAT floppy");
     copy_reset_job();
     return false;
   }
@@ -1132,12 +1511,16 @@ bool copy_start_from_image(const char *image_file_path,
 
   fr = stfs_stat(&copyJob.image_fs, copyJob.source_path, copyJob.image_entry_info);
   if (fr != FR_OK) {
+    copy_set_start_error(fr, "source path not found inside image");
     copy_reset_job();
     return false;
   }
 
-  fr = f_stat(copyJob.info.dst_path, copyJob.entry_info);
+  fr = f_stat(copyJob.dest_path, copyJob.entry_info);
   if (fr == FR_OK || (fr != FR_NO_FILE && fr != FR_NO_PATH)) {
+    copy_set_start_error(fr == FR_OK ? FR_EXIST : fr,
+                         fr == FR_OK ? "destination already exists"
+                                     : "destination check failed");
     copy_reset_job();
     return false;
   }
@@ -1152,6 +1535,12 @@ bool copy_reset_status(void) {
   if (copy_is_active()) return false;
   copy_reset_job();
   return true;
+}
+
+FRESULT copy_get_last_start_error(void) { return copyLastStartError; }
+
+const char *copy_get_last_start_error_message(void) {
+  return copyLastStartErrorMessage;
 }
 
 void copy_poll(void) {

@@ -636,30 +636,20 @@ FRESULT floppy_ST2MSA(const char *folder, char *stFilename, char *msaFilename,
   uint16_t sides = 0;
   uint16_t tracks = 0;
 
-  DPRINTF("floppy_ST2MSA: begin folder='%s' src='%s' dst='%s' overwrite=%d\n",
-          folder ? folder : "(null)", stFilename ? stFilename : "(null)",
-          msaFilename ? msaFilename : "(null)", overwrite ? 1 : 0);
-
   if (!folder || !stFilename || !msaFilename || stFilename[0] == '\0' ||
       msaFilename[0] == '\0') {
-    DPRINTF("floppy_ST2MSA: invalid parameters\n");
     return FR_INVALID_PARAMETER;
   }
 
   fr = f_stat(folder, NULL);
   if (fr != FR_OK) {
-    DPRINTF("floppy_ST2MSA: folder check failed for '%s' -> %d\n", folder, fr);
     return FR_NO_PATH;
   }
-  DPRINTF("floppy_ST2MSA: folder exists\n");
 
   src_path = allocPathBuffer();
   dest_path = allocPathBuffer();
   boot_sector = malloc(NUM_BYTES_PER_SECTOR);
-  DPRINTF("floppy_ST2MSA: buffers allocated src_path=%p dest_path=%p boot=%p\n",
-          (void *)src_path, (void *)dest_path, (void *)boot_sector);
   if (!src_path || !dest_path || !boot_sector) {
-    DPRINTF("floppy_ST2MSA: initial allocation failed\n");
     free(boot_sector);
     free(dest_path);
     free(src_path);
@@ -667,134 +657,78 @@ FRESULT floppy_ST2MSA(const char *folder, char *stFilename, char *msaFilename,
   }
 
   fr = buildPath(folder, stFilename, src_path, ST_IMAGE_MAX_PATH_LEN);
-  if (fr != FR_OK) {
-    DPRINTF("floppy_ST2MSA: buildPath src failed -> %d\n", fr);
-    goto cleanup;
-  }
+  if (fr != FR_OK) goto cleanup;
   fr = buildPath(folder, msaFilename, dest_path, ST_IMAGE_MAX_PATH_LEN);
-  if (fr != FR_OK) {
-    DPRINTF("floppy_ST2MSA: buildPath dst failed -> %d\n", fr);
-    goto cleanup;
-  }
-  DPRINTF("floppy_ST2MSA: src_path='%s' dest_path='%s'\n", src_path, dest_path);
+  if (fr != FR_OK) goto cleanup;
 
   fr = f_stat(dest_path, NULL);
   if (fr == FR_OK && !overwrite) {
-    DPRINTF("floppy_ST2MSA: destination exists and overwrite disabled\n");
     fr = FR_EXIST;
     goto cleanup;
   }
-  DPRINTF("floppy_ST2MSA: destination check result=%d\n", fr);
 
   fr = f_open(&src_file, src_path, FA_READ);
   if (fr != FR_OK) {
-    DPRINTF("floppy_ST2MSA: f_open source failed -> %d\n", fr);
     fr = FR_NO_FILE;
     goto cleanup;
   }
   src_open = true;
-  DPRINTF("floppy_ST2MSA: source opened\n");
 
   source_size_fs = f_size(&src_file);
-  if (source_size_fs > UINT32_MAX) {
-    DPRINTF("floppy_ST2MSA: source size exceeds 32-bit range\n");
-  } else {
-    DPRINTF("floppy_ST2MSA: source size raw=%lu\n",
-            (unsigned long)source_size_fs);
-  }
   if (source_size_fs == 0 || source_size_fs > UINT32_MAX) {
-    DPRINTF("floppy_ST2MSA: source size invalid\n");
     fr = FR_INT_ERR;
     goto cleanup;
   }
   source_size = (uint32_t)source_size_fs;
   if (source_size < (8u * NUM_BYTES_PER_SECTOR)) {
-    DPRINTF("floppy_ST2MSA: source image too small -> %lu\n",
-            (unsigned long)source_size);
     fr = FR_INT_ERR;
     goto cleanup;
   }
-  DPRINTF("floppy_ST2MSA: source size=%lu\n", (unsigned long)source_size);
 
   fr = readExact(&src_file, boot_sector, NUM_BYTES_PER_SECTOR);
-  if (fr != FR_OK) {
-    DPRINTF("floppy_ST2MSA: boot sector read failed -> %d\n", fr);
-    goto cleanup;
-  }
-  DPRINTF(
-      "floppy_ST2MSA: boot sector read ok bytes[0..15]=%02x %02x %02x %02x "
-      "%02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x\n",
-      boot_sector[0], boot_sector[1], boot_sector[2], boot_sector[3],
-      boot_sector[4], boot_sector[5], boot_sector[6], boot_sector[7],
-      boot_sector[8], boot_sector[9], boot_sector[10], boot_sector[11],
-      boot_sector[12], boot_sector[13], boot_sector[14], boot_sector[15]);
+  if (fr != FR_OK) goto cleanup;
 
   floppy_findDiskDetails(boot_sector, source_size, &sectors_per_track, &sides);
-  DPRINTF("floppy_ST2MSA: geometry sectors_per_track=%u sides=%u\n",
-          (unsigned)sectors_per_track, (unsigned)sides);
   if (sectors_per_track == 0 || sides == 0 || sides > 2) {
-    DPRINTF("floppy_ST2MSA: geometry invalid\n");
     fr = FR_INT_ERR;
     goto cleanup;
   }
 
   track_bytes = (uint32_t)sectors_per_track * NUM_BYTES_PER_SECTOR;
-  DPRINTF("floppy_ST2MSA: track_bytes=%lu max_track_bytes=%lu\n",
-          (unsigned long)track_bytes, (unsigned long)ST_IMAGE_MAX_TRACK_BYTES);
   if (track_bytes == 0 || track_bytes > ST_IMAGE_MAX_TRACK_BYTES ||
       (source_size % (track_bytes * (uint32_t)sides)) != 0) {
-    DPRINTF("floppy_ST2MSA: track geometry mismatch source_size=%lu divisor=%lu\n",
-            (unsigned long)source_size,
-            (unsigned long)(track_bytes * (uint32_t)sides));
     fr = FR_INT_ERR;
     goto cleanup;
   }
 
   tracks = (uint16_t)(source_size / (track_bytes * (uint32_t)sides));
-  DPRINTF("floppy_ST2MSA: tracks=%u\n", (unsigned)tracks);
   if (tracks == 0 || tracks > 86) {
-    DPRINTF("floppy_ST2MSA: tracks out of range\n");
     fr = FR_INT_ERR;
     goto cleanup;
   }
 
   max_dest_size =
       source_size + sizeof(msa_header_t) + ((uint32_t)tracks * sides * 2u);
-  DPRINTF("floppy_ST2MSA: max_dest_size=%lu\n", (unsigned long)max_dest_size);
   fr = checkDiskSpace(folder, max_dest_size);
-  if (fr != FR_OK) {
-    DPRINTF("floppy_ST2MSA: disk space check failed -> %d\n", fr);
-    goto cleanup;
-  }
-  DPRINTF("floppy_ST2MSA: disk space ok\n");
+  if (fr != FR_OK) goto cleanup;
 
   track_buffer = malloc(track_bytes);
   encoded_track = malloc(track_bytes);
-  DPRINTF("floppy_ST2MSA: track buffers allocated track=%p encoded=%p bytes=%lu\n",
-          (void *)track_buffer, (void *)encoded_track,
-          (unsigned long)track_bytes);
   if (!track_buffer || !encoded_track) {
-    DPRINTF("floppy_ST2MSA: track buffer allocation failed\n");
     fr = FR_NOT_ENOUGH_CORE;
     goto cleanup;
   }
 
   fr = f_lseek(&src_file, 0);
-  if (fr != FR_OK) {
-    DPRINTF("floppy_ST2MSA: source seek to 0 failed -> %d\n", fr);
-    goto cleanup;
-  }
-  DPRINTF("floppy_ST2MSA: source seek reset ok\n");
+  if (fr != FR_OK) goto cleanup;
 
   fr = f_open(&dest_file, dest_path, overwrite ? (FA_WRITE | FA_CREATE_ALWAYS)
                                                : (FA_WRITE | FA_CREATE_NEW));
   if (fr != FR_OK) {
-    DPRINTF("floppy_ST2MSA: destination open failed -> %d\n", fr);
     fr = (fr == FR_EXIST) ? FR_EXIST : FR_NO_FILE;
     goto cleanup;
   }
   dest_open = true;
-  DPRINTF("floppy_ST2MSA: destination opened\n");
 
   writeShortBE(header_buf, 0x0E0F);
   writeShortBE(header_buf + 2, sectors_per_track);
@@ -802,105 +736,45 @@ FRESULT floppy_ST2MSA(const char *folder, char *stFilename, char *msaFilename,
   writeShortBE(header_buf + 6, 0);
   writeShortBE(header_buf + 8, (uint16_t)(tracks - 1));
   fr = writeExact(&dest_file, header_buf, sizeof(header_buf));
-  if (fr != FR_OK) {
-    DPRINTF("floppy_ST2MSA: header write failed -> %d\n", fr);
-    goto cleanup;
-  }
-  DPRINTF(
-      "floppy_ST2MSA: header written id=0x%02x%02x spt=%u sidesMinus1=%u "
-      "start=0 end=%u\n",
-      header_buf[0], header_buf[1], (unsigned)sectors_per_track,
-      (unsigned)(sides - 1), (unsigned)(tracks - 1));
+  if (fr != FR_OK) goto cleanup;
 
   for (uint16_t track = 0; track < tracks && fr == FR_OK; track++) {
     for (uint16_t side = 0; side < sides; side++) {
       size_t encoded_size = 0;
-      DPRINTF("floppy_ST2MSA: track=%u side=%u reading %lu bytes\n",
-              (unsigned)track, (unsigned)side, (unsigned long)track_bytes);
 
       fr = readExact(&src_file, track_buffer, (UINT)track_bytes);
-      if (fr != FR_OK) {
-        DPRINTF("floppy_ST2MSA: track read failed track=%u side=%u -> %d\n",
-                (unsigned)track, (unsigned)side, fr);
-        goto cleanup;
-      }
-      DPRINTF(
-          "floppy_ST2MSA: track=%u side=%u first16=%02x %02x %02x %02x %02x "
-          "%02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x\n",
-          (unsigned)track, (unsigned)side, track_buffer[0], track_buffer[1],
-          track_buffer[2], track_buffer[3], track_buffer[4], track_buffer[5],
-          track_buffer[6], track_buffer[7], track_buffer[8], track_buffer[9],
-          track_buffer[10], track_buffer[11], track_buffer[12], track_buffer[13],
-          track_buffer[14], track_buffer[15]);
+      if (fr != FR_OK) goto cleanup;
 
       encoded_size = msa_measureEncodedTrack(track_buffer, (uint16_t)track_bytes);
-      DPRINTF("floppy_ST2MSA: track=%u side=%u encoded_size=%lu track_bytes=%lu\n",
-              (unsigned)track, (unsigned)side, (unsigned long)encoded_size,
-              (unsigned long)track_bytes);
       if (encoded_size < track_bytes) {
         uint16_t encoded_len = 0;
         if (!msa_encodeTrack(track_buffer, (uint16_t)track_bytes, encoded_track,
                              track_bytes, &encoded_len)) {
-          DPRINTF("floppy_ST2MSA: msa_encodeTrack failed track=%u side=%u\n",
-                  (unsigned)track, (unsigned)side);
           fr = FR_INT_ERR;
           goto cleanup;
         }
-        DPRINTF("floppy_ST2MSA: track=%u side=%u compressed encoded_len=%u\n",
-                (unsigned)track, (unsigned)side, (unsigned)encoded_len);
         writeShortBE(length_buf, encoded_len);
         fr = writeExact(&dest_file, length_buf, sizeof(length_buf));
-        if (fr != FR_OK) {
-          DPRINTF(
-              "floppy_ST2MSA: length write failed track=%u side=%u -> %d\n",
-              (unsigned)track, (unsigned)side, fr);
-          goto cleanup;
-        }
+        if (fr != FR_OK) goto cleanup;
         fr = writeExact(&dest_file, encoded_track, encoded_len);
-        if (fr != FR_OK) {
-          DPRINTF(
-              "floppy_ST2MSA: compressed data write failed track=%u side=%u "
-              "-> %d\n",
-              (unsigned)track, (unsigned)side, fr);
-          goto cleanup;
-        }
-        DPRINTF("floppy_ST2MSA: track=%u side=%u compressed write ok\n",
-                (unsigned)track, (unsigned)side);
+        if (fr != FR_OK) goto cleanup;
       } else {
-        DPRINTF("floppy_ST2MSA: track=%u side=%u stored uncompressed\n",
-                (unsigned)track, (unsigned)side);
         writeShortBE(length_buf, (uint16_t)track_bytes);
         fr = writeExact(&dest_file, length_buf, sizeof(length_buf));
-        if (fr != FR_OK) {
-          DPRINTF(
-              "floppy_ST2MSA: raw length write failed track=%u side=%u -> %d\n",
-              (unsigned)track, (unsigned)side, fr);
-          goto cleanup;
-        }
+        if (fr != FR_OK) goto cleanup;
         fr = writeExact(&dest_file, track_buffer, (UINT)track_bytes);
-        if (fr != FR_OK) {
-          DPRINTF(
-              "floppy_ST2MSA: raw track write failed track=%u side=%u -> %d\n",
-              (unsigned)track, (unsigned)side, fr);
-          goto cleanup;
-        }
-        DPRINTF("floppy_ST2MSA: track=%u side=%u raw write ok\n",
-                (unsigned)track, (unsigned)side);
+        if (fr != FR_OK) goto cleanup;
       }
     }
   }
 
 cleanup:
-  DPRINTF("floppy_ST2MSA: cleanup begin fr=%d dest_open=%d src_open=%d\n",
-          fr, dest_open ? 1 : 0, src_open ? 1 : 0);
   if (dest_open) {
     FRESULT close_fr = f_close(&dest_file);
-    DPRINTF("floppy_ST2MSA: close dest -> %d\n", close_fr);
     if (fr == FR_OK) fr = close_fr;
   }
   if (src_open) {
     FRESULT close_fr = f_close(&src_file);
-    DPRINTF("floppy_ST2MSA: close src -> %d\n", close_fr);
     if (fr == FR_OK) fr = close_fr;
   }
   free(encoded_track);
@@ -908,6 +782,10 @@ cleanup:
   free(boot_sector);
   free(dest_path);
   free(src_path);
-  DPRINTF("floppy_ST2MSA: end fr=%d\n", fr);
+  if (fr != FR_OK) {
+    DPRINTF("floppy_ST2MSA failed: src='%s' dst='%s' fr=%d\n",
+            stFilename ? stFilename : "(null)",
+            msaFilename ? msaFilename : "(null)", (int)fr);
+  }
   return fr;
 }
