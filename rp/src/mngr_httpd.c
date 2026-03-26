@@ -6,8 +6,6 @@
  * Description: HTTPD server functions for manager httpd
  */
 
-#include <inttypes.h>
-
 #include "mngr_httpd.h"
 #include "include/floppy.h"
 #include "include/stfs.h"
@@ -472,9 +470,9 @@ static const char *json_copy_status_response(void) {
                     "\"cancelRequested\":%s,\"percent\":%u,"
                     "\"filesTotal\":%lu,\"filesDone\":%lu,"
                     "\"dirsTotal\":%lu,\"dirsDone\":%lu,"
-                    "\"bytesTotal\":%" PRIu64 ",\"bytesDone\":%" PRIu64 ","
-                    "\"currentFileSize\":%" PRIu64 ","
-                    "\"currentFileDone\":%" PRIu64 ","
+                    "\"bytesTotal\":%llu,\"bytesDone\":%llu,"
+                    "\"currentFileSize\":%llu,"
+                    "\"currentFileDone\":%llu,"
                     "\"errorCode\":%d,\"src\":",
                     copy_status_to_string(info.status),
                     copy_operation_to_string(info.operation),
@@ -483,9 +481,12 @@ static const char *json_copy_status_response(void) {
                     (unsigned long)info.files_total,
                     (unsigned long)info.files_done,
                     (unsigned long)info.dirs_total,
-                    (unsigned long)info.dirs_done, info.bytes_total,
-                    info.bytes_done, info.current_file_size,
-                    info.current_file_done, (int)info.last_error) ||
+                    (unsigned long)info.dirs_done,
+                    (unsigned long long)info.bytes_total,
+                    (unsigned long long)info.bytes_done,
+                    (unsigned long long)info.current_file_size,
+                    (unsigned long long)info.current_file_done,
+                    (int)info.last_error) ||
       !json_append_escaped_string(json_buff, sizeof(json_buff), &json_len,
                                   info.src_path) ||
       !json_appendf(json_buff, sizeof(json_buff), &json_len, ",\"dst\":") ||
