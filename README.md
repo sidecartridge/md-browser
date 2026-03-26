@@ -1,6 +1,6 @@
 # SidecarTridge Multi-device File & Download Manager
 
-This microfirmware app for the **SidecarTridge Multi-device** enables you to browse, search, and download files from the public floppy image database, as well as manage files on your microSD card—all from a modern web interface.
+This microfirmware app for the **SidecarTridge Multi-device** lets you browse and download floppy images from the public database, manage files on your microSD card, and work directly with Atari ST disk images from a simple web interface.
 
 ## 🚀 Installation
 
@@ -25,33 +25,31 @@ When you start your Atari, the app displays a screen with a **QR code**. Scan th
 
 ### 💾 Floppy Images Database
 
-Click the **Floppy DB** menu option in the web interface to access the **Floppy Images Database**. Here you can browse, search, filter, and download floppy images directly to your microSD card.
+Click **Floppy DB** in the web interface to open the public floppy image database.
+
+This page is split into two parts:
+
+* **What’s New** for the latest uploads
+* **Main Catalog** for older classics and crew collections
 
 ![Floppy Images Database Search Page](/BROWSER-FLOPPYDB-MAIN.png)
 
-**Search Options:**
+Use the tools at the top of the page to find what you want:
 
-* **What's new:** Show only files recently added to the database.
-* **Filter by label:** Narrow results by label, such as cracking team names or software type.
+* **Search box:** Type part of a title to narrow the list
+* **Label chips:** Filter by team name, software type, or collection label
+* **What’s New:** Best for recent uploads
+* **Main Catalog:** Best for older favorites
 
-Start typing in the search box for smart suggestions. For example, typing `xe` will suggest titles like `Xevious` or `Xenon`.
+You can use the green **download** icon next to an entry to choose where it should be saved on your microSD card.
 
 ![Floppy Images Database Search Results](/BROWSER-FLOPPYDB-RESULT.png)
 
-**Search results** appear as a table with:
-
-* **Name**: File name
-* **Date**: Date added
-* **Label**: Associated label
-* **Save to**: Button to save the file to your microSD
-
 To download:
 
-1. Click **Save to** next to the file you want.
+1. Click the **download icon** next to the file you want.
 2. Choose a destination folder from the dialog.
 3. Click **Download Here** to start the download.
-
-> **Note:** You must select a folder and then click **Download Here**; clicking the folder name alone is not enough.
 
 When complete, your file is saved to the chosen folder. Use the [Drives Emulator](https://docs.sidecartridge.com/sidecartridge-multidevice/microfirmwares/drives_emulator/) or a solution like Gotek to access your files on your Atari.
 
@@ -63,11 +61,14 @@ The **File Manager** lets you manage files and folders on your microSD card. You
 
 * Navigate folders
 * View file details
-* Delete files/folders
+* Rename, copy, move, and delete files or folders
 * Upload multiple files
 * Download files
 * Create folders
 * Upload files from internet URLs
+* Create blank Atari ST disk images
+* Convert `.MSA` and `.ST` floppy images
+* Open and browse `.ST` and `.st.rw` images like folders
 
 #### Table View
 
@@ -76,14 +77,14 @@ Click **File Manager** in the web interface. You’ll see your microSD card’s 
 * **Name**
 * **Size**
 * **Timestamp**
-* **Rename** (icon)
-* **Delete** (icon)
+* **Actions** (icons for copy, move, rename, delete, and more)
 
 Toolbar options above the table:
 
 * **Upload files**: Select files from your computer to upload (multi-select supported)
 * **Upload from URL**: Download files directly from an internet URL to the current folder
 * **New Folder**: Create a new directory
+* **Blank ST Image**: Create a new empty Atari ST disk image
 
 ![File Manager Table View](/BROWSER-FILEMANAGER-ROOT.png)
 
@@ -104,15 +105,60 @@ Rows are color-coded:
 
 #### File Actions
 
-Rename or delete files/folders using the icons. Click a file row for more details and options:
+Use the action icons on each row to manage files and folders. Click a file row for more details and options.
+
+Depending on the file, you can:
 
 * **Toggle hidden** attribute
 * **Toggle read-only** attribute
 * **Rename** file
 * **Delete** file (with confirmation)
 * **Download** file to your computer
+* **Copy** to another folder
+* **Move** to another folder
+* **Convert** between `.MSA` and `.ST`
+* **Browse Image** for `.ST` and `.st.rw` files
 
 ![File Details Actions](/BROWSER-FILEMANAGER-FILEACTIONS.png)
+
+#### Creating a Blank ST Image
+
+To create a new empty floppy image:
+
+1. Open **File Manager**
+2. Go to the folder where you want to save it
+3. Click **Blank ST Image**
+4. Choose the disk size
+5. Enter a file name
+6. Optionally enter a volume name
+7. Choose `.st` or `.st.rw`
+8. Click **Create image**
+
+Use `.st` for a normal floppy image. Use `.st.rw` if you want to edit the image later inside the web interface or with the Multidrive Emulator.
+
+#### Converting MSA and ST Images
+
+If you have an `.MSA` or `.ST` file, use the **convert** icon to create the other format automatically.
+
+This is useful when you download software in one format and need the other one for your Atari setup.
+
+#### Browsing Inside ST Images
+
+You can open `.ST` and `.st.rw` images directly in the file manager.
+
+1. Find the image file
+2. Click **Browse Image**
+3. The image opens like a normal folder
+
+Inside the image you can look through the files and folders without extracting the image first.
+
+If the image is a writable `.st.rw` image, you can also:
+
+* Rename files
+* Delete files or folders
+* Import files and folders from the microSD card into the image
+
+You can also copy files or folders from the image back to the microSD card.
 
 #### Uploading Files
 
@@ -130,6 +176,7 @@ You can also use your SidecarTridge Multi-device as a USB mass storage device. S
 ### ⏏️ Exiting to GEMDOS or Booster
 
 * **ESC** on the QR code screen launches the **Booster** app.
+* You can also return to **Booster** from the top menu in the web interface.
 * **Any other key** exits the emulator and boots into the Atari GEM desktop. The web interface remains active.
 * To return to setup, press **SELECT** on your Multi-device and reboot, or power cycle your Atari.
 * **Hold SELECT for 10 seconds** to reset your Multi-device to factory settings (useful for troubleshooting or starting fresh).
