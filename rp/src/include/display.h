@@ -52,7 +52,7 @@
 // Buffer size calculation: width * (height / 8)
 #define DISPLAY_BUFFER_SIZE \
   (uint32_t)((DISPLAY_WIDTH / DISPLAY_TILE_HEIGHT) * DISPLAY_HEIGHT)
-#define DISPLAY_COPYRIGHT_MESSAGE "(C)GOODDATA LABS SL 2023-25"
+#define DISPLAY_COPYRIGHT_MESSAGE "(C)GOODDATA LABS SL 2023-26"
 #define DISPLAY_PRODUCT_MSG "SidecarTridge Multi-Device"
 #define DISPLAY_RESET_WAIT_MESSAGE "Resetting the computer"
 #define DISPLAY_RESET_FORCE_MESSAGE "Reset manually if it doesn't boot."

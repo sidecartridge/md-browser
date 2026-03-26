@@ -2,7 +2,7 @@
  * File: main.c
  * Author: Diego Parrilla Santamaría
  * Date: February 2025
- * Copyright: 2023-25 - GOODDATA LABS SL
+ * Copyright: 2023-26 - GOODDATA LABS SL
  * Description: Main file for an app.
  */
 
