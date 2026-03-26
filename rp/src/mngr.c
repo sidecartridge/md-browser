@@ -2,11 +2,12 @@
  * File: mngr.c
  * Author: Diego Parrilla Santamaría
  * Date: December 2024
- * Copyright: 2023-25 - GOODDATA LABS SL
+ * Copyright: 2023-26 - GOODDATA LABS SL
  * Description: C file with the main loop of the manager module
  */
 
 #include "mngr.h"
+
 #include "copy.h"
 
 static bool startBooster =
@@ -158,8 +159,9 @@ void __not_in_flash_func(mngr_loop)() {
     // Validate minimum payload size before decoding mandatory fields.
     // The random token occupies 4 bytes at the start of the payload.
     if (lastProtocol->payload_size < 4) {
-      DPRINTF("Invalid protocol payload_size=%u for command_id=%u (need >= 4)\n",
-              lastProtocol->payload_size, lastProtocol->command_id);
+      DPRINTF(
+          "Invalid protocol payload_size=%u for command_id=%u (need >= 4)\n",
+          lastProtocol->payload_size, lastProtocol->command_id);
       // Drop malformed command and continue.
       __compiler_memory_barrier();
       protocolRingTail =
