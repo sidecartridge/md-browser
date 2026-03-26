@@ -8,6 +8,7 @@
 
 #include "mngr_httpd.h"
 #include "include/floppy.h"
+#include "include/stfs.h"
 static mngr_httpd_response_status_t response_status = MNGR_HTTPD_RESPONSE_OK;
 static char json_buff[MAX_JSON_PAYLOAD_SIZE] = {0};  // Buffer for JSON payload
 static char httpd_response_message[MNGR_HTTPD_RESPONSE_MSG_LEN] = {0};
@@ -1031,6 +1032,159 @@ static const char *cgi_move_start(int iIndex, int iNumParams, char *pcParam[],
                             COPY_OPERATION_MOVE);
 }
 
+static const char *cgi_img_copy_start(int iIndex, int iNumParams, char *pcParam[],
+                                      char *pcValue[]) {
+  LWIP_UNUSED_ARG(iIndex);
+
+  bool started = false;
+  const char *host_folder = NULL;
+  const char *image = NULL;
+  const char *src_path_param = NULL;
+  const char *dst_folder = NULL;
+  char *decoded_host_folder = NULL;
+  char *decoded_image = NULL;
+  char *decoded_src_path = NULL;
+  char *decoded_dst_folder = NULL;
+  char *host_folder_abs = NULL;
+  char *dst_folder_abs = NULL;
+  char *image_abs = NULL;
+  char *image_src_path = NULL;
+  char *dst_path = NULL;
+  FILINFO *dst_folder_info = NULL;
+  FILINFO *dst_info = NULL;
+  stfs_t *image_fs = NULL;
+  stfs_dirent_t *source_info = NULL;
+  FRESULT fr = FR_OK;
+
+  if (copy_is_active()) {
+    strcpy(json_buff, "{\"error\":\"file operation already in progress\"}");
+    return "/json.shtml";
+  }
+  if (download_job_active()) {
+    strcpy(json_buff, "{\"error\":\"another file write is in progress\"}");
+    return "/json.shtml";
+  }
+
+  decoded_host_folder = httpd_alloc_str(MNGR_HTTPD_MAX_FOLDER_LEN);
+  decoded_image = httpd_alloc_str(MNGR_HTTPD_MAX_NAME_LEN);
+  decoded_src_path = httpd_alloc_str(MNGR_HTTPD_MAX_PATH_LEN);
+  decoded_dst_folder = httpd_alloc_str(MNGR_HTTPD_MAX_FOLDER_LEN);
+  host_folder_abs = httpd_alloc_str(MNGR_HTTPD_MAX_FOLDER_LEN);
+  dst_folder_abs = httpd_alloc_str(MNGR_HTTPD_MAX_FOLDER_LEN);
+  image_abs = httpd_alloc_str(MNGR_HTTPD_MAX_PATH_LEN);
+  image_src_path = httpd_alloc_str(MNGR_HTTPD_MAX_PATH_LEN);
+  dst_path = httpd_alloc_str(MNGR_HTTPD_MAX_PATH_LEN);
+  dst_folder_info = calloc(1, sizeof(*dst_folder_info));
+  dst_info = calloc(1, sizeof(*dst_info));
+  image_fs = calloc(1, sizeof(*image_fs));
+  source_info = calloc(1, sizeof(*source_info));
+  if (!decoded_host_folder || !decoded_image || !decoded_src_path ||
+      !decoded_dst_folder || !host_folder_abs || !dst_folder_abs ||
+      !image_abs || !image_src_path || !dst_path || !dst_folder_info ||
+      !dst_info || !image_fs || !source_info) {
+    strcpy(json_buff, "{\"error\":\"out of memory\"}");
+    goto cleanup;
+  }
+
+  for (int i = 0; i < iNumParams; i++) {
+    if (!strcmp(pcParam[i], "folder")) host_folder = pcValue[i];
+    if (!strcmp(pcParam[i], "image")) image = pcValue[i];
+    if (!strcmp(pcParam[i], "srcPath")) src_path_param = pcValue[i];
+    if (!strcmp(pcParam[i], "dstFolder")) dst_folder = pcValue[i];
+  }
+
+  if (!host_folder || !image || !src_path_param || !dst_folder) {
+    strcpy(json_buff, "{\"error\":\"missing parameters\"}");
+    goto cleanup;
+  }
+
+  if (!url_decode(host_folder, decoded_host_folder,
+                  MNGR_HTTPD_MAX_FOLDER_LEN) ||
+      !url_decode(image, decoded_image, MNGR_HTTPD_MAX_NAME_LEN) ||
+      !url_decode(src_path_param, decoded_src_path, MNGR_HTTPD_MAX_PATH_LEN) ||
+      !url_decode(dst_folder, decoded_dst_folder, MNGR_HTTPD_MAX_FOLDER_LEN) ||
+      !normalize_and_validate_path(decoded_host_folder, host_folder_abs,
+                                   MNGR_HTTPD_MAX_FOLDER_LEN) ||
+      !normalize_and_validate_path(decoded_dst_folder, dst_folder_abs,
+                                   MNGR_HTTPD_MAX_FOLDER_LEN) ||
+      !normalize_and_validate_path(decoded_src_path, image_src_path,
+                                   MNGR_HTTPD_MAX_PATH_LEN) ||
+      !join_root_folder_name(host_folder_abs, decoded_image, image_abs,
+                             MNGR_HTTPD_MAX_PATH_LEN)) {
+    strcpy(json_buff, "{\"error\":\"invalid image or destination path\"}");
+    goto cleanup;
+  }
+
+  if (!stfs_can_browse_filename(decoded_image)) {
+    strcpy(json_buff, "{\"error\":\"unsupported image type\"}");
+    goto cleanup;
+  }
+
+  fr = stfs_open(image_fs, image_abs);
+  if (fr != FR_OK) {
+    strcpy(json_buff, "{\"error\":\"image is not a browsable FAT floppy\"}");
+    goto cleanup;
+  }
+
+  fr = stfs_stat(image_fs, image_src_path, source_info);
+  if (fr != FR_OK) {
+    strcpy(json_buff, "{\"error\":\"source path not found inside image\"}");
+    goto cleanup;
+  }
+  if (strcmp(source_info->name, "/") == 0 || source_info->name[0] == '\0') {
+    strcpy(json_buff, "{\"error\":\"cannot copy the image root\"}");
+    goto cleanup;
+  }
+
+  if (!ascii_streq_ci(dst_folder_abs, "/")) {
+    fr = f_stat(dst_folder_abs, dst_folder_info);
+    if (fr != FR_OK || !(dst_folder_info->fattrib & AM_DIR)) {
+      strcpy(json_buff, "{\"error\":\"destination folder not found\"}");
+      goto cleanup;
+    }
+  }
+
+  if (!join_root_folder_name(dst_folder_abs, source_info->name, dst_path,
+                             MNGR_HTTPD_MAX_PATH_LEN)) {
+    strcpy(json_buff, "{\"error\":\"invalid destination path\"}");
+    goto cleanup;
+  }
+
+  fr = f_stat(dst_path, dst_info);
+  if (fr == FR_OK) {
+    strcpy(json_buff, "{\"error\":\"destination already exists\"}");
+    goto cleanup;
+  }
+  if (fr != FR_NO_FILE && fr != FR_NO_PATH) {
+    snprintf(json_buff, sizeof(json_buff),
+             "{\"error\":\"destination check failed %d\"}", (int)fr);
+    goto cleanup;
+  }
+
+  if (!copy_start_from_image(image_abs, image_src_path, dst_path)) {
+    strcpy(json_buff, "{\"error\":\"copy could not be started\"}");
+    goto cleanup;
+  }
+  started = true;
+
+cleanup:
+  if (image_fs) stfs_close(image_fs);
+  free(source_info);
+  free(image_fs);
+  free(dst_info);
+  free(dst_folder_info);
+  free(dst_path);
+  free(image_src_path);
+  free(image_abs);
+  free(dst_folder_abs);
+  free(host_folder_abs);
+  free(decoded_dst_folder);
+  free(decoded_src_path);
+  free(decoded_image);
+  free(decoded_host_folder);
+  return started ? json_copy_status_response() : "/json.shtml";
+}
+
 static const char *cgi_copy_status(int iIndex, int iNumParams, char *pcParam[],
                                    char *pcValue[]) {
   LWIP_UNUSED_ARG(iIndex);
@@ -1552,6 +1706,189 @@ cleanup:
   return "/json.shtml";
 }
 
+typedef struct {
+  size_t json_len;
+  unsigned idx;
+  int next_item;
+  bool truncated;
+  bool any_entries;
+} stfs_json_list_ctx_t;
+
+static bool stfs_json_list_callback(const stfs_dirent_t *entry,
+                                    void *user_data) {
+  stfs_json_list_ctx_t *ctx = (stfs_json_list_ctx_t *)user_data;
+  unsigned ts = 0;
+  size_t entry_start = 0;
+
+  if (!entry || !ctx) return false;
+  if (ctx->idx++ < (unsigned)ctx->next_item) return true;
+
+  ts = ((unsigned)entry->date << 16) | (unsigned)entry->time;
+  entry_start = ctx->json_len;
+  if (!json_appendf(json_buff, sizeof(json_buff), &ctx->json_len, "{\"n\":") ||
+      !json_append_escaped_string(json_buff, sizeof(json_buff), &ctx->json_len,
+                                  entry->name) ||
+      !json_appendf(json_buff, sizeof(json_buff), &ctx->json_len,
+                    ",\"a\":%u,\"s\":%lu,\"t\":%u},", (unsigned)entry->attr,
+                    (unsigned long)entry->size, ts)) {
+    json_buff[entry_start] = '\0';
+    ctx->json_len = entry_start;
+    ctx->truncated = true;
+    return false;
+  }
+
+  ctx->any_entries = true;
+  return true;
+}
+
+static const char *cgi_img_ls(int iIndex, int iNumParams, char *pcParam[],
+                              char *pcValue[]) {
+  LWIP_UNUSED_ARG(iIndex);
+
+  const char *req_folder = NULL;
+  const char *req_image = NULL;
+  const char *req_path = NULL;
+  char *decoded_folder = NULL;
+  char *decoded_image = NULL;
+  char *decoded_path = NULL;
+  char *folder_abs = NULL;
+  char *image_abs = NULL;
+  char *image_path = NULL;
+  stfs_t *image_fs = NULL;
+  stfs_info_t *image_info = NULL;
+  stfs_dirent_t *path_info = NULL;
+  FRESULT fr = FR_OK;
+  stfs_json_list_ctx_t ctx = {0};
+
+  decoded_folder = httpd_alloc_str(MNGR_HTTPD_MAX_FOLDER_LEN);
+  decoded_image = httpd_alloc_str(MNGR_HTTPD_MAX_NAME_LEN);
+  decoded_path = httpd_alloc_str(MNGR_HTTPD_MAX_PATH_LEN);
+  folder_abs = httpd_alloc_str(MNGR_HTTPD_MAX_FOLDER_LEN);
+  image_abs = httpd_alloc_str(MNGR_HTTPD_MAX_PATH_LEN);
+  image_path = httpd_alloc_str(MNGR_HTTPD_MAX_PATH_LEN);
+  image_fs = calloc(1, sizeof(*image_fs));
+  image_info = calloc(1, sizeof(*image_info));
+  path_info = calloc(1, sizeof(*path_info));
+  if (!decoded_folder || !decoded_image || !decoded_path || !folder_abs ||
+      !image_abs || !image_path || !image_fs || !image_info || !path_info) {
+    strcpy(json_buff, "{\"error\":\"out of memory\"}");
+    goto cleanup;
+  }
+
+  for (int i = 0; i < iNumParams; i++) {
+    if (strcmp(pcParam[i], "folder") == 0) req_folder = pcValue[i];
+    if (strcmp(pcParam[i], "image") == 0) req_image = pcValue[i];
+    if (strcmp(pcParam[i], "path") == 0) req_path = pcValue[i];
+    if (strcmp(pcParam[i], "nextItem") == 0) ctx.next_item = atoi(pcValue[i]);
+  }
+
+  if (!req_folder || !req_image) {
+    strcpy(json_buff, "{\"error\":\"missing parameters\"}");
+    goto cleanup;
+  }
+
+  if (!url_decode(req_folder, decoded_folder, MNGR_HTTPD_MAX_FOLDER_LEN) ||
+      !url_decode(req_image, decoded_image, MNGR_HTTPD_MAX_NAME_LEN) ||
+      !normalize_and_validate_path(decoded_folder, folder_abs,
+                                   MNGR_HTTPD_MAX_FOLDER_LEN) ||
+      !join_root_folder_name(folder_abs, decoded_image, image_abs,
+                             MNGR_HTTPD_MAX_PATH_LEN)) {
+    strcpy(json_buff, "{\"error\":\"invalid image path\"}");
+    goto cleanup;
+  }
+
+  if (!stfs_can_browse_filename(decoded_image)) {
+    strcpy(json_buff, "{\"error\":\"unsupported image type\"}");
+    goto cleanup;
+  }
+
+  if (req_path && req_path[0] != '\0') {
+    if (!url_decode(req_path, decoded_path, MNGR_HTTPD_MAX_PATH_LEN) ||
+        !normalize_and_validate_path(decoded_path, image_path,
+                                     MNGR_HTTPD_MAX_PATH_LEN)) {
+      strcpy(json_buff, "{\"error\":\"invalid image folder\"}");
+      goto cleanup;
+    }
+  } else {
+    strcpy(image_path, "/");
+  }
+
+  fr = stfs_open(image_fs, image_abs);
+  if (fr != FR_OK) {
+    strcpy(json_buff, "{\"error\":\"image is not a browsable FAT floppy\"}");
+    goto cleanup;
+  }
+  stfs_get_info(image_fs, image_info);
+
+  fr = stfs_stat(image_fs, image_path, path_info);
+  if (fr != FR_OK) {
+    strcpy(json_buff, "{\"error\":\"image folder not found\"}");
+    goto cleanup;
+  }
+  if (!(path_info->attr & 0x10u) && strcmp(image_path, "/") != 0) {
+    strcpy(json_buff, "{\"error\":\"image path is not a folder\"}");
+    goto cleanup;
+  }
+
+  ctx.json_len = 0;
+  json_buff[0] = '\0';
+  if (!json_appendf(json_buff, sizeof(json_buff), &ctx.json_len,
+                    "{\"items\":[")) {
+    strcpy(json_buff, "{\"items\":[],\"meta\":{}}");
+    goto cleanup;
+  }
+
+  fr = stfs_list_dir(image_fs, image_path, stfs_json_list_callback, &ctx);
+  if (fr != FR_OK) {
+    strcpy(json_buff, "{\"error\":\"cannot read image folder\"}");
+    goto cleanup;
+  }
+
+  if (ctx.truncated) {
+    if (ctx.json_len > 1 && json_buff[ctx.json_len - 1] == ',') {
+      json_buff[ctx.json_len - 1] = '\0';
+      ctx.json_len--;
+    }
+    if (ctx.json_len > 1) {
+      (void)json_appendf(json_buff, sizeof(json_buff), &ctx.json_len, ",{}]");
+    } else {
+      (void)json_appendf(json_buff, sizeof(json_buff), &ctx.json_len, "{}]");
+    }
+  } else if (ctx.any_entries) {
+    if (ctx.json_len > 1 && json_buff[ctx.json_len - 1] == ',') {
+      json_buff[ctx.json_len - 1] = '\0';
+      ctx.json_len--;
+    }
+    (void)json_appendf(json_buff, sizeof(json_buff), &ctx.json_len, "]");
+  } else {
+    (void)json_appendf(json_buff, sizeof(json_buff), &ctx.json_len, "]");
+  }
+
+  if (!json_appendf(
+          json_buff, sizeof(json_buff), &ctx.json_len,
+          ",\"meta\":{\"fat\":%u,\"totalBytes\":%lu,\"freeBytes\":%lu,"
+          "\"tracks\":%u,\"sides\":%u,\"sectorsPerTrack\":%u}}",
+          (unsigned)image_info->fat_type, (unsigned long)image_info->total_bytes,
+          (unsigned long)image_info->free_bytes,
+          (unsigned)image_info->track_count, (unsigned)image_info->head_count,
+          (unsigned)image_info->sectors_per_track)) {
+    strcpy(json_buff, "{\"error\":\"image metadata unavailable\"}");
+  }
+
+cleanup:
+  if (image_fs) stfs_close(image_fs);
+  free(path_info);
+  free(image_info);
+  free(image_fs);
+  free(image_path);
+  free(image_abs);
+  free(folder_abs);
+  free(decoded_path);
+  free(decoded_image);
+  free(decoded_folder);
+  return "/json.shtml";
+}
+
 // Upload context for resumable uploads
 #define MAX_UPLOAD_CONTEXTS 4
 typedef struct {
@@ -2062,9 +2399,129 @@ cleanup:
 }
 
 // CGI: delete file
-// Recursively delete path (file or directory)
-// Delete file or directory only if directory is empty
-static FRESULT delete_path(const char *path) {
+// Delete file or directory only if directory is empty, unless recursive
+#ifndef MNGR_HTTPD_DELETE_MAX_DEPTH
+#define MNGR_HTTPD_DELETE_MAX_DEPTH 16
+#endif
+
+typedef struct {
+  DIR dir;
+  size_t path_len;
+} delete_stack_frame_t;
+
+static bool delete_append_name(char *path, size_t path_size, const char *name,
+                               size_t *new_len) {
+  size_t len = 0;
+  int written = 0;
+
+  if (!path || !name || !new_len) return false;
+
+  len = strlen(path);
+  written = snprintf(path + len, path_size - len, "%s%s",
+                     (len > 0 && path[len - 1] != '/') ? "/" : "", name);
+  if (written < 0 || (size_t)written >= (path_size - len)) return false;
+
+  *new_len = len + (size_t)written;
+  return true;
+}
+
+static bool delete_copy_string(char *dst, size_t dst_len, const char *src) {
+  size_t src_len = 0;
+
+  if (!dst || !src || dst_len == 0) return false;
+  src_len = strlen(src);
+  if (src_len >= dst_len) return false;
+  memcpy(dst, src, src_len + 1);
+  return true;
+}
+
+static FRESULT delete_path_recursive(const char *path) {
+  FILINFO *fno = calloc(1, sizeof(*fno));
+  delete_stack_frame_t *stack = NULL;
+  char *work_path = NULL;
+  uint8_t depth = 0;
+  FRESULT fr = FR_OK;
+
+  if (!fno) return FR_NOT_ENOUGH_CORE;
+
+  fr = f_stat(path, fno);
+  if (fr != FR_OK) goto cleanup;
+  if (!(fno->fattrib & AM_DIR)) {
+    fr = f_unlink(path);
+    goto cleanup;
+  }
+
+  stack = calloc(MNGR_HTTPD_DELETE_MAX_DEPTH, sizeof(*stack));
+  work_path = calloc(1, MNGR_HTTPD_MAX_PATH_LEN);
+  if (!stack || !work_path) {
+    fr = FR_NOT_ENOUGH_CORE;
+    goto cleanup;
+  }
+  if (!delete_copy_string(work_path, MNGR_HTTPD_MAX_PATH_LEN, path)) {
+    fr = FR_INVALID_NAME;
+    goto cleanup;
+  }
+
+  fr = f_opendir(&stack[0].dir, work_path);
+  if (fr != FR_OK) goto cleanup;
+  stack[0].path_len = strlen(work_path);
+  depth = 1;
+
+  while (depth > 0) {
+    delete_stack_frame_t *frame = &stack[depth - 1];
+
+    fr = f_readdir(&frame->dir, fno);
+    if (fr != FR_OK) break;
+
+    if (fno->fname[0] == '\0') {
+      (void)f_closedir(&frame->dir);
+      fr = f_unlink(work_path);
+      if (fr != FR_OK) break;
+      depth--;
+      if (depth > 0) {
+        work_path[stack[depth - 1].path_len] = '\0';
+      }
+      continue;
+    }
+
+    {
+      size_t child_len = 0;
+      if (!delete_append_name(work_path, MNGR_HTTPD_MAX_PATH_LEN, fno->fname,
+                              &child_len)) {
+        fr = FR_INVALID_NAME;
+        break;
+      }
+
+      if (fno->fattrib & AM_DIR) {
+        if (depth >= MNGR_HTTPD_DELETE_MAX_DEPTH) {
+          fr = FR_DENIED;
+          break;
+        }
+
+        fr = f_opendir(&stack[depth].dir, work_path);
+        if (fr != FR_OK) break;
+        stack[depth].path_len = child_len;
+        depth++;
+      } else {
+        fr = f_unlink(work_path);
+        work_path[frame->path_len] = '\0';
+        if (fr != FR_OK) break;
+      }
+    }
+  }
+
+cleanup:
+  while (depth > 0 && stack) {
+    depth--;
+    (void)f_closedir(&stack[depth].dir);
+  }
+  free(work_path);
+  free(stack);
+  free(fno);
+  return fr;
+}
+
+static FRESULT delete_path(const char *path, bool recursive) {
   FILINFO *fno = calloc(1, sizeof(*fno));
   DIR *dir = NULL;
   FRESULT fr = FR_OK;
@@ -2074,7 +2531,11 @@ static FRESULT delete_path(const char *path) {
   fr = f_stat(path, fno);
   if (fr != FR_OK) goto cleanup;
   if (fno->fattrib & AM_DIR) {
-    // Check if directory is empty
+    if (recursive) {
+      free(fno);
+      return delete_path_recursive(path);
+    }
+
     dir = calloc(1, sizeof(*dir));
     if (!dir) {
       fr = FR_NOT_ENOUGH_CORE;
@@ -2085,16 +2546,14 @@ static FRESULT delete_path(const char *path) {
     fr = f_readdir(dir, fno);
     f_closedir(dir);
     if (fr != FR_OK) goto cleanup;
-    // If first entry name is not empty, directory has contents
     if (fno->fname[0] != '\0') {
       fr = FR_DENIED;
       goto cleanup;
     }
-    // Empty directory -> remove
     fr = f_unlink(path);
     goto cleanup;
   }
-  // Regular file
+
   fr = f_unlink(path);
 
 cleanup:
@@ -2102,15 +2561,17 @@ cleanup:
   free(fno);
   return fr;
 }
+
 static const char *cgi_del(int iIndex, int iNumParams, char *pcParam[],
                            char *pcValue[]) {
   if (reject_if_copy_active()) return "/json.shtml";
 
-  const char *folder = NULL, *src = NULL;
+  const char *folder = NULL, *src = NULL, *recursive_param = NULL;
   char *df = NULL;
   char *ds = NULL;
   char *folder_abs = NULL;
   char *path = NULL;
+  bool recursive = false;
 
   df = httpd_alloc_str(MNGR_HTTPD_MAX_FOLDER_LEN);
   ds = httpd_alloc_str(MNGR_HTTPD_MAX_NAME_LEN);
@@ -2123,11 +2584,15 @@ static const char *cgi_del(int iIndex, int iNumParams, char *pcParam[],
   for (int i = 0; i < iNumParams; i++) {
     if (!strcmp(pcParam[i], "folder")) folder = pcValue[i];
     if (!strcmp(pcParam[i], "src")) src = pcValue[i];
+    if (!strcmp(pcParam[i], "recursive")) recursive_param = pcValue[i];
   }
   if (!folder || !src) {
     strcpy(json_buff, "{\"error\":\"missing parameters\"}");
     goto cleanup;
   }
+  recursive = recursive_param &&
+              !(strcmp(recursive_param, "0") == 0 ||
+                strcmp(recursive_param, "false") == 0);
   if (!url_decode(folder, df, MNGR_HTTPD_MAX_FOLDER_LEN) ||
       !url_decode(src, ds, MNGR_HTTPD_MAX_NAME_LEN) ||
       !normalize_and_validate_path(df, folder_abs,
@@ -2139,10 +2604,10 @@ static const char *cgi_del(int iIndex, int iNumParams, char *pcParam[],
     strcpy(json_buff, "{\"error\":\"invalid path\"}");
     goto cleanup;
   }
-  FRESULT r = delete_path(path);
+  FRESULT r = delete_path(path, recursive);
   if (r == FR_DENIED) {
     snprintf(json_buff, sizeof(json_buff),
-             "{\"error\":\"directory not empty\"}");
+             "{\"error\":\"directory not empty\",\"directoryNotEmpty\":true}");
   } else if (r != FR_OK) {
     snprintf(json_buff, sizeof(json_buff), "{\"error\":\"delete failed %d\"}",
              r);
@@ -2226,6 +2691,7 @@ static const tCGI cgi_handlers[] = {
     {"/folder.cgi", cgi_folder},
     {"/download.cgi", cgi_download},
     {"/ls.cgi", cgi_ls},
+    {"/img_ls.cgi", cgi_img_ls},
     {"/upload_start.cgi", cgi_upload_start},
     {"/upload_chunk.cgi", cgi_upload_chunk},
     {"/upload_end.cgi", cgi_upload_end},
@@ -2233,6 +2699,7 @@ static const tCGI cgi_handlers[] = {
     {"/ren.cgi", cgi_ren},
     {"/mkdir.cgi", cgi_mkdir},
     {"/copy_start.cgi", cgi_copy_start},
+    {"/img_copy_start.cgi", cgi_img_copy_start},
     {"/move_start.cgi", cgi_move_start},
     {"/copy_status.cgi", cgi_copy_status},
     {"/copy_cancel.cgi", cgi_copy_cancel},

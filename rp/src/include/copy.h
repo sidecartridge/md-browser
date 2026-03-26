@@ -67,6 +67,8 @@ typedef struct {
 
 bool copy_start(const char *src_path, const char *dst_path);
 bool copy_start_move(const char *src_path, const char *dst_path);
+bool copy_start_from_image(const char *image_file_path, const char *image_src_path,
+                           const char *dst_path);
 bool copy_reset_status(void);
 void copy_poll(void);
 void copy_request_cancel(void);
