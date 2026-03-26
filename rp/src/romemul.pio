@@ -1,7 +1,7 @@
 ; RP2040 PIO programs to simulate a ROM cartridge for the Atari ST
 ; Author: Diego Parrilla Santamaría
 ; Date: July 2023-February 2025
-; Copyright: 2023-25 - GOODDATA LABS SL
+; Copyright: 2023-26 - GOODDATA LABS SL
 ;
 
 ;
