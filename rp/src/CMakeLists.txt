@@ -3,6 +3,11 @@ cmake_minimum_required(VERSION 3.26)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+find_package(Perl)
+if(NOT PERL_FOUND)
+    message(FATAL_ERROR "Perl is needed for generating the fsdata.c file")
+endif()
+
 # if PICOTOOL_OVERRIDE_DIR system environment variable is set,
 # then use that as the folder for the picotool executable
 if (DEFINED ENV{PICOTOOL_OVERRIDE_DIR})
@@ -73,6 +78,15 @@ pico_sdk_init()
 
 # Create the fsdata.c file
 set(MAKE_FS_DATA_SCRIPT ${CMAKE_CURRENT_LIST_DIR}/external/makefsdata)
+set(GENERATE_FS_DATA_SCRIPT ${CMAKE_CURRENT_LIST_DIR}/external/generate_fsdata.pl)
+set(FSDATA_WORK_DIR ${CMAKE_CURRENT_BINARY_DIR}/fsdata_work)
+set(FLASH_USAGE_REPORT_SCRIPT ${CMAKE_CURRENT_LIST_DIR}/report_flash_usage.cmake)
+set(RP_SIZE_TOOL ${CMAKE_SIZE_UTIL})
+file(GLOB_RECURSE RP_FS_FILES LIST_DIRECTORIES false
+        ${CMAKE_CURRENT_LIST_DIR}/fs/*)
+if (NOT RP_SIZE_TOOL)
+    find_program(RP_SIZE_TOOL NAMES arm-none-eabi-size)
+endif()
 
 # WARNING: I use a modified version of the makefsdata script to add text/css headers, not supported in the original tool
 if (NOT EXISTS ${MAKE_FS_DATA_SCRIPT})
@@ -82,15 +96,23 @@ if (NOT EXISTS ${MAKE_FS_DATA_SCRIPT})
                 )
 endif()
 
-message(STATUS "Running makefsdata script")
-execute_process(COMMAND
-        perl ${MAKE_FS_DATA_SCRIPT}
+add_custom_command(
+        OUTPUT ${CMAKE_CURRENT_LIST_DIR}/fsdata_srv.c
+        COMMAND
+                ${PERL_EXECUTABLE} ${GENERATE_FS_DATA_SCRIPT}
+                ${MAKE_FS_DATA_SCRIPT}
+                ${CMAKE_CURRENT_LIST_DIR}/fs
+                ${CMAKE_CURRENT_LIST_DIR}/fsdata_srv.c
+                ${FSDATA_WORK_DIR}
+        DEPENDS
+                ${GENERATE_FS_DATA_SCRIPT}
+                ${MAKE_FS_DATA_SCRIPT}
+                ${RP_FS_FILES}
         WORKING_DIRECTORY ${CMAKE_CURRENT_LIST_DIR}
-        ECHO_OUTPUT_VARIABLE
-        ECHO_ERROR_VARIABLE
-        )
-file(REMOVE ${CMAKE_CURRENT_LIST_DIR}/fsdata_srv.c)
-file(RENAME ${CMAKE_CURRENT_LIST_DIR}/fsdata.c ${CMAKE_CURRENT_LIST_DIR}/fsdata_srv.c)
+        COMMENT "Minifying web assets and generating fsdata_srv.c"
+        VERBATIM
+)
+add_custom_target(generate_rp_fsdata DEPENDS ${CMAKE_CURRENT_LIST_DIR}/fsdata_srv.c)
 
 add_subdirectory(settings)
 
@@ -102,6 +124,7 @@ add_subdirectory(qrcodegen)
 
 # Add HTTP client library
 add_subdirectory(httpc)
+add_dependencies(httpc generate_rp_fsdata)
 
 # Tell CMake where to find other source code
 add_subdirectory($ENV{FATFS_SDK_PATH}/src build)
@@ -110,12 +133,14 @@ add_subdirectory($ENV{FATFS_SDK_PATH}/src build)
 add_executable(${PROJECT_NAME} 
         main.c
 )
+add_dependencies(${PROJECT_NAME} generate_rp_fsdata)
 
 pico_generate_pio_header(${PROJECT_NAME} ${CMAKE_CURRENT_LIST_DIR}/romemul.pio)
 
 target_sources(${PROJECT_NAME} PRIVATE
         aconfig.c
         blink.c
+        copy.c
         display.c
         display_term.c
         display_mngr.c
@@ -130,6 +155,8 @@ target_sources(${PROJECT_NAME} PRIVATE
         romemul.c
         sdcard.c
         select.c
+        floppy.c
+        stfs.c
         usb_descriptors.c
         usb_mass.c
         tusb_config.h
@@ -137,6 +164,22 @@ target_sources(${PROJECT_NAME} PRIVATE
 
 # Create map/bin/hex/uf2 files
 pico_add_extra_outputs(${PROJECT_NAME})
+
+if (RP_SIZE_TOOL)
+    add_custom_command(
+            TARGET ${PROJECT_NAME} POST_BUILD
+            COMMAND
+                    ${CMAKE_COMMAND}
+                    -DREPORT_ELF=$<TARGET_FILE:${PROJECT_NAME}>
+                    -DLINKER_SCRIPT=${CMAKE_CURRENT_LIST_DIR}/memmap_rp.ld
+                    -DSIZE_TOOL=${RP_SIZE_TOOL}
+                    -DREPORT_NAME=RP
+                    -P ${FLASH_USAGE_REPORT_SCRIPT}
+            VERBATIM
+    )
+else()
+    message(WARNING "arm-none-eabi-size not found. RP flash usage report disabled.")
+endif()
 
 # Link libraries required for the project
 target_link_libraries(${PROJECT_NAME} PRIVATE

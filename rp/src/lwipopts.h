@@ -17,36 +17,28 @@
 #define MEM_LIBC_MALLOC 1
 #else
 // MEM_LIBC_MALLOC is incompatible with non polling versions
-#define MEM_LIBC_MALLOC 0
+// Must be undefined. Setting it to 0 can break non-poll builds.
+#undef MEM_LIBC_MALLOC
 #endif
 
 #define MEM_ALIGNMENT 4
-#define MEM_SIZE 4096
+#define MEM_SIZE 1024
 
-#if defined(_DEBUG) && (_DEBUG != 0)
-#define MEM_SANITY_CHECK 1
-#define MEM_OVERFLOW_CHECK 2
-#else
 #define MEM_SANITY_CHECK 0
 #define MEM_OVERFLOW_CHECK 0
-#endif
 
-#define MEMP_NUM_PBUF 32
+#define MEMP_NUM_PBUF 4
 #define MEMP_NUM_TCP_PCB 10
 #define MEMP_NUM_TCP_SEG 32
 #define MEMP_NUM_ARP_QUEUE 10
-#define PBUF_POOL_SIZE 32
+#define PBUF_POOL_SIZE 4
 #define LWIP_ARP 1
 #define LWIP_ETHERNET 1
 #define LWIP_ICMP 0
 #define LWIP_RAW 0
 #define TCP_MSS 1460
-#define TCP_WND (12 * TCP_MSS)
+#define TCP_WND (4 * TCP_MSS)
 #define TCP_SND_BUF (8 * TCP_MSS)
-
-// #define TCP_WND (6 * TCP_MSS)
-// #define TCP_SND_BUF (4 * TCP_MSS)
-
 #define TCP_SND_QUEUELEN ((4 * (TCP_SND_BUF) + (TCP_MSS - 1)) / (TCP_MSS))
 #define LWIP_NETIF_STATUS_CALLBACK 1
 #define LWIP_NETIF_LINK_CALLBACK 1
@@ -113,10 +105,9 @@
 #define MDNS_RESP_USENETIF_EXTCALLBACK 1
 // #define MEMP_NUM_SYS_TIMEOUT (LWIP_NUM_SYS_TIMEOUT_INTERNAL + 3)
 #define MEMP_NUM_SYS_TIMEOUT (32)
-#define MEMP_NUM_TCP_PCB 12
 
 // #define TCP_FAST_INTERVAL 50
-#define TCP_NODELAY 0
+#define TCP_NODELAY 1
 
 #define LWIP_NETIF_API \
   0  //  Not needed. Sequential API, and therefore for platforms with OSes only.
@@ -124,7 +115,9 @@
   0  //  Not needed. Sequential API, and therefore for platforms with OSes only.
 
 #define LWIP_TIMERS 1  // Enable timers (needed for HTTPD)
-#define LWIP_HTTPD 0
+#define LWIP_HTTPD 1
+
+#if LWIP_HTTPD == 1
 #define LWIP_HTTPD_SSI 1
 #define LWIP_HTTPD_CGI 1
 // don't include the tag comment - less work for the CPU, but may be harder to
@@ -135,20 +128,29 @@
 #define LWIP_HTTPD_SUPPORT_POST 1
 #define LWIP_HTTPD_SUPPORT_11_KEEPALIVE 1
 #define LWIP_HTTPD_FILE_STATE 1
-
 #define LWIP_HTTPD_FS_ASYNC_READ 1
 #define HTTPD_POLL_INTERVAL 1
 #define HTTPD_PRECALCULATED_CHECKSUM 1
 #define HTTPD_USE_MEM_POOL 1
-
+// Keep these below the working repo defaults to reduce RAM pressure with the
+// per-connection JSON snapshot support used by md-browser.
 #define MEMP_NUM_PARALLEL_HTTPD_CONNS 2
 #define MEMP_NUM_PARALLEL_HTTPD_SSI_CONNS 2
-
 #define LWIP_HTTPD_ABORT_ON_CLOSE_MEM_ERROR 1
-
 #define HTTPD_FSDATA_FILE "fsdata_srv.c"
+#endif
 
-#if BOOSTER_DOWNLOAD_HTTPS == 1
+#ifndef FMANAGER_DOWNLOAD_HTTPS
+#if defined(APP_DOWNLOAD_HTTPS)
+#define FMANAGER_DOWNLOAD_HTTPS APP_DOWNLOAD_HTTPS
+#elif defined(BOOSTER_DOWNLOAD_HTTPS)
+#define FMANAGER_DOWNLOAD_HTTPS BOOSTER_DOWNLOAD_HTTPS
+#else
+#define FMANAGER_DOWNLOAD_HTTPS 0
+#endif
+#endif
+
+#if FMANAGER_DOWNLOAD_HTTPS == 1
 // If you don't want to use TLS (just a http request) you can avoid linking to
 // mbedtls and remove the following
 #define LWIP_ALTCP 1

@@ -2,7 +2,7 @@
  * File: romemul.c
  * Author: Diego Parrilla Santamaría
  * Date: July 2023-February 2025
- * Copyright: 2023-25 - GOODDATA LABS SL
+ * Copyright: 2023-26 - GOODDATA LABS SL
  * Description: C file that contains the main function of the ROM emulator.
  */
 
@@ -238,17 +238,19 @@ int init_romemul(IRQInterceptionCallback requestCallback,
   }
 
   // Push to the FIFO the Most Significant word of the addresses to read from
-  // the ROM in the lower 17 bits of the 32 bits of the FIFO register. Only need
-  // 16 bits from the rp2040 memory address, so shift right 17 bits to get the
-  // 16 bits In the PIO program, the address is shifted left 1 bit to make room
-  // for the ROM4 signal and the 16 bits of the address from the GPIO input. So
-  // the address is created as follows: bits 31-17: MSB of the address from the
-  // rp2040 memory. In our case 0x20020000 bit 16: ROM4 signal. Since is an
-  // inverted signal, we set it to 0 for ROM4 and 1 if not ROM4 (ROM3) bits
-  // 15-0: 16 bits of the address from the GPIO input The RAM memory address of
-  // the rp2040 and the FLASH memory used are defined in the file memmap_rp.ld
-  // Please do not modify these values, because they are carefully selected to
-  // avoid conflicts and be performant.
+  // the ROM in the lower 16 bits of the 32 bits of the FIFO register. Only need
+  // 16 bits from the rp2040 memory address, so shift right 16 bits to get the
+  // high word. In the PIO program, the address is shifted left 1 bit to make
+  // room for the ROM4 signal and the 16 bits of the address from the GPIO
+  // input. So the address is created as follows: bits 31-17: MSB of the address
+  // from the rp2040 memory. In our case the logical ROM window spans
+  // 0x20020000-0x2003FFFF, with the upper 64KB reserved as ROM_IN_RAM and the
+  // lower 64KB coming from the reclaimed top bank of general RAM. Bit 16 is the
+  // ROM4 signal. Since is an inverted signal, we set it to 0 for ROM4 and 1 if
+  // not ROM4 (ROM3) bits 15-0: 16 bits of the address from the GPIO input The
+  // RAM memory address of the rp2040 and the FLASH memory used are defined in
+  // the file memmap_rp.ld Please do not modify these values, because they are
+  // carefully selected to avoid conflicts and be performant.
 
   pio_sm_put_blocking(
       defaultPio, smReadROM,

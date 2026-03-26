@@ -1,0 +1,82 @@
+if(NOT DEFINED REPORT_ELF)
+    message(FATAL_ERROR "REPORT_ELF is required")
+endif()
+
+if(NOT DEFINED LINKER_SCRIPT)
+    message(FATAL_ERROR "LINKER_SCRIPT is required")
+endif()
+
+if(NOT DEFINED SIZE_TOOL)
+    message(FATAL_ERROR "SIZE_TOOL is required")
+endif()
+
+if(DEFINED REPORT_NAME AND NOT REPORT_NAME STREQUAL "")
+    set(REPORT_PREFIX "${REPORT_NAME} flash usage")
+else()
+    set(REPORT_PREFIX "Flash usage")
+endif()
+
+file(READ "${LINKER_SCRIPT}" LINKER_SCRIPT_CONTENT)
+string(REGEX MATCH "FLASH\\(rx\\)[^\r\n]*LENGTH[ \t]*=[ \t]*([0-9]+)([KkMm]?)"
+       FLASH_REGION_MATCH "${LINKER_SCRIPT_CONTENT}")
+if(NOT FLASH_REGION_MATCH)
+    message(FATAL_ERROR "Could not parse FLASH length from ${LINKER_SCRIPT}")
+endif()
+
+set(FLASH_LIMIT_VALUE "${CMAKE_MATCH_1}")
+set(FLASH_LIMIT_SUFFIX "${CMAKE_MATCH_2}")
+string(TOUPPER "${FLASH_LIMIT_SUFFIX}" FLASH_LIMIT_SUFFIX)
+
+if(FLASH_LIMIT_SUFFIX STREQUAL "K")
+    math(EXPR FLASH_LIMIT_BYTES "${FLASH_LIMIT_VALUE} * 1024")
+elseif(FLASH_LIMIT_SUFFIX STREQUAL "M")
+    math(EXPR FLASH_LIMIT_BYTES "${FLASH_LIMIT_VALUE} * 1024 * 1024")
+else()
+    set(FLASH_LIMIT_BYTES "${FLASH_LIMIT_VALUE}")
+endif()
+
+execute_process(
+    COMMAND "${SIZE_TOOL}" "${REPORT_ELF}"
+    RESULT_VARIABLE SIZE_RESULT
+    OUTPUT_VARIABLE SIZE_OUTPUT
+    ERROR_VARIABLE SIZE_ERROR
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+)
+
+if(NOT SIZE_RESULT EQUAL 0)
+    message(FATAL_ERROR "Failed to run ${SIZE_TOOL} on ${REPORT_ELF}: ${SIZE_ERROR}")
+endif()
+
+string(REPLACE "\r\n" "\n" SIZE_OUTPUT "${SIZE_OUTPUT}")
+string(REPLACE "\r" "\n" SIZE_OUTPUT "${SIZE_OUTPUT}")
+string(REGEX REPLACE "\n+$" "" SIZE_OUTPUT "${SIZE_OUTPUT}")
+string(REGEX REPLACE "\n" ";" SIZE_LINES "${SIZE_OUTPUT}")
+list(LENGTH SIZE_LINES SIZE_LINE_COUNT)
+if(SIZE_LINE_COUNT LESS 2)
+    message(FATAL_ERROR "Unexpected size output:\n${SIZE_OUTPUT}")
+endif()
+
+list(GET SIZE_LINES 1 SIZE_VALUES_LINE)
+string(REGEX MATCH "^[ \t]*([0-9]+)[ \t]+([0-9]+)[ \t]+([0-9]+)[ \t]+([0-9]+)[ \t]+([0-9A-Fa-f]+)"
+       SIZE_VALUES_MATCH "${SIZE_VALUES_LINE}")
+if(NOT SIZE_VALUES_MATCH)
+    message(FATAL_ERROR "Could not parse size output line:\n${SIZE_VALUES_LINE}")
+endif()
+
+set(FLASH_USED_BYTES "${CMAKE_MATCH_1}")
+math(EXPR FLASH_HEADROOM_BYTES "${FLASH_LIMIT_BYTES} - ${FLASH_USED_BYTES}")
+math(EXPR FLASH_USED_PERCENT "(${FLASH_USED_BYTES} * 100 + ${FLASH_LIMIT_BYTES} / 2) / ${FLASH_LIMIT_BYTES}")
+
+get_filename_component(REPORT_ELF_NAME "${REPORT_ELF}" NAME)
+set(FLASH_LIMIT_LABEL "${FLASH_LIMIT_VALUE}${FLASH_LIMIT_SUFFIX}")
+
+if(FLASH_HEADROOM_BYTES GREATER_EQUAL 0)
+    message(STATUS
+            "${REPORT_PREFIX} [${REPORT_ELF_NAME}]: ${FLASH_USED_BYTES} / ${FLASH_LIMIT_BYTES} bytes "
+            "(slot ${FLASH_LIMIT_LABEL}, ${FLASH_USED_PERCENT}% used, ${FLASH_HEADROOM_BYTES} bytes free)")
+else()
+    math(EXPR FLASH_OVERFLOW_BYTES "0 - ${FLASH_HEADROOM_BYTES}")
+    message(FATAL_ERROR
+            "${REPORT_PREFIX} [${REPORT_ELF_NAME}]: ${FLASH_USED_BYTES} / ${FLASH_LIMIT_BYTES} bytes "
+            "(slot ${FLASH_LIMIT_LABEL}, ${FLASH_USED_PERCENT}% used, overflow ${FLASH_OVERFLOW_BYTES} bytes)")
+endif()

@@ -259,6 +259,29 @@ const char* network_getAuthTypeStringShort(uint16_t connect_code);
 ip_addr_t network_getCurrentIp();
 
 /**
+ * @brief Returns the CYW43 MAC address as a human-readable string.
+ *
+ * @return Pointer to a static string in the format `xx:xx:xx:xx:xx:xx`.
+ */
+const char* network_getCyw43MacStr();
+
+/**
+ * @brief Retrieves the current RSSI for the STA connection.
+ *
+ * @param rssi Output pointer for the RSSI value.
+ * @return true if a valid RSSI value was retrieved, false otherwise.
+ */
+bool network_getCurrentRssi(int32_t* rssi);
+
+/**
+ * @brief Maps an RSSI value to a user-friendly quality label.
+ *
+ * @param rssi RSSI in dBm.
+ * @return Pointer to a static label string.
+ */
+const char* network_getSignalQualityLabel(int32_t rssi);
+
+/**
  * @brief Parses and cleans up an SSID string.
  *
  * This function processes the input SSID and ensures it meets the required
