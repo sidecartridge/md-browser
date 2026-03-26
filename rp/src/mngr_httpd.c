@@ -390,6 +390,60 @@ static bool download_job_active(void) {
   }
 }
 
+static const char *download_status_to_string(download_status_t status) {
+  switch (status) {
+    case DOWNLOAD_STATUS_IDLE:
+      return "idle";
+    case DOWNLOAD_STATUS_REQUESTED:
+      return "requested";
+    case DOWNLOAD_STATUS_NOT_STARTED:
+      return "not_started";
+    case DOWNLOAD_STATUS_STARTED:
+      return "started";
+    case DOWNLOAD_STATUS_IN_PROGRESS:
+      return "in_progress";
+    case DOWNLOAD_STATUS_COMPLETED:
+      return "completed";
+    case DOWNLOAD_STATUS_FAILED:
+      return "failed";
+    default:
+      return "unknown";
+  }
+}
+
+static const char *json_download_status_response(void) {
+  download_status_t status = download_getStatus();
+  const char *error_message = "";
+
+  if (status == DOWNLOAD_STATUS_FAILED) {
+    error_message = download_getErrorString();
+    if (!error_message || error_message[0] == '\0' ||
+        strcmp(error_message, "Unknown error") == 0) {
+      error_message = "Download failed";
+    }
+  }
+
+  size_t json_len = 0;
+  json_buff[0] = '\0';
+  if (!json_appendf(json_buff, sizeof(json_buff), &json_len,
+                    "{\"status\":\"%s\",\"active\":%s,\"folder\":",
+                    download_status_to_string(status),
+                    download_job_active() ? "true" : "false") ||
+      !json_append_escaped_string(json_buff, sizeof(json_buff), &json_len,
+                                  download_getDstFolder()) ||
+      !json_appendf(json_buff, sizeof(json_buff), &json_len, ",\"url\":") ||
+      !json_append_escaped_string(json_buff, sizeof(json_buff), &json_len,
+                                  download_getUrl()) ||
+      !json_appendf(json_buff, sizeof(json_buff), &json_len, ",\"error\":") ||
+      !json_append_escaped_string(json_buff, sizeof(json_buff), &json_len,
+                                  error_message) ||
+      !json_appendf(json_buff, sizeof(json_buff), &json_len, "}")) {
+    strcpy(json_buff, "{\"error\":\"download status unavailable\"}");
+  }
+
+  return "/json.shtml";
+}
+
 static bool reject_if_copy_active(void) {
   if (!copy_is_active()) return false;
   strcpy(json_buff, "{\"error\":\"file operation in progress\"}");
@@ -650,12 +704,11 @@ static const char *ssi_tags[] = {
     "SDCARDB",   // 5 - SD card status true or false
     "APPSFLDB",  // 6 - Apps folder status true or false
     "JSONPLD",   // 7 - JSON payload
-    "DWNLDSTS",  // 8 - Download status
-    "TITLEHDR",  // 9 - Title header
-    "WIFILST",   // 10 - WiFi list
-    "WLSTSTP",   // 11 - WiFi list stop
-    "RSPSTS",    // 12 - Response status
-    "RSPMSG",    // 13 - Response message
+    "TITLEHDR",  // 8 - Title header
+    "WIFILST",   // 9 - WiFi list
+    "WLSTSTP",   // 10 - WiFi list stop
+    "RSPSTS",    // 11 - Response status
+    "RSPMSG",    // 12 - Response message
     "BTFTR",     // 14 - Boot feature
     "SFCNFGRB",  // 15 - Safe Config Reboot
     "SDBDRTKB",  // 16 - SD Card Baud Rate
@@ -999,9 +1052,14 @@ static const char *cgi_transfer_start(int iIndex, int iNumParams, char *pcParam[
 
   if (!(operation == COPY_OPERATION_MOVE ? copy_start_move(src_path, dst_path)
                                          : copy_start(src_path, dst_path))) {
+    const char *start_error = copy_get_last_start_error_message();
     snprintf(json_buff, sizeof(json_buff),
-             "{\"error\":\"%s could not be started\"}",
-             copy_operation_to_string(operation));
+             "{\"error\":\"%s\"}",
+             (start_error && start_error[0] != '\0')
+                 ? start_error
+                 : (operation == COPY_OPERATION_MOVE
+                        ? "move could not be started"
+                        : "copy could not be started"));
     goto cleanup;
   }
   started = true;
@@ -1162,7 +1220,11 @@ static const char *cgi_img_copy_start(int iIndex, int iNumParams, char *pcParam[
   }
 
   if (!copy_start_from_image(image_abs, image_src_path, dst_path)) {
-    strcpy(json_buff, "{\"error\":\"copy could not be started\"}");
+    const char *start_error = copy_get_last_start_error_message();
+    snprintf(json_buff, sizeof(json_buff), "{\"error\":\"%s\"}",
+             (start_error && start_error[0] != '\0')
+                 ? start_error
+                 : "copy could not be started");
     goto cleanup;
   }
   started = true;
@@ -1182,6 +1244,156 @@ cleanup:
   free(decoded_src_path);
   free(decoded_image);
   free(decoded_host_folder);
+  return started ? json_copy_status_response() : "/json.shtml";
+}
+
+static const char *cgi_img_import_start(int iIndex, int iNumParams,
+                                        char *pcParam[], char *pcValue[]) {
+  LWIP_UNUSED_ARG(iIndex);
+
+  bool started = false;
+  const char *src_folder = NULL;
+  const char *src = NULL;
+  const char *image_folder = NULL;
+  const char *image = NULL;
+  const char *dst_path_param = NULL;
+  char *decoded_src_folder = NULL;
+  char *decoded_src = NULL;
+  char *decoded_image_folder = NULL;
+  char *decoded_image = NULL;
+  char *decoded_dst_path = NULL;
+  char *src_folder_abs = NULL;
+  char *image_folder_abs = NULL;
+  char *src_path = NULL;
+  char *image_abs = NULL;
+  char *image_dst_path = NULL;
+  FILINFO *src_info = NULL;
+  stfs_t *image_fs = NULL;
+  stfs_dirent_t *image_dst_info = NULL;
+  FRESULT fr = FR_OK;
+
+  if (copy_is_active()) {
+    strcpy(json_buff, "{\"error\":\"file operation already in progress\"}");
+    return "/json.shtml";
+  }
+  if (download_job_active()) {
+    strcpy(json_buff, "{\"error\":\"another file write is in progress\"}");
+    return "/json.shtml";
+  }
+
+  decoded_src_folder = httpd_alloc_str(MNGR_HTTPD_MAX_FOLDER_LEN);
+  decoded_src = httpd_alloc_str(MNGR_HTTPD_MAX_NAME_LEN);
+  decoded_image_folder = httpd_alloc_str(MNGR_HTTPD_MAX_FOLDER_LEN);
+  decoded_image = httpd_alloc_str(MNGR_HTTPD_MAX_NAME_LEN);
+  decoded_dst_path = httpd_alloc_str(MNGR_HTTPD_MAX_PATH_LEN);
+  src_folder_abs = httpd_alloc_str(MNGR_HTTPD_MAX_FOLDER_LEN);
+  image_folder_abs = httpd_alloc_str(MNGR_HTTPD_MAX_FOLDER_LEN);
+  src_path = httpd_alloc_str(MNGR_HTTPD_MAX_PATH_LEN);
+  image_abs = httpd_alloc_str(MNGR_HTTPD_MAX_PATH_LEN);
+  image_dst_path = httpd_alloc_str(MNGR_HTTPD_MAX_PATH_LEN);
+  src_info = calloc(1, sizeof(*src_info));
+  image_fs = calloc(1, sizeof(*image_fs));
+  image_dst_info = calloc(1, sizeof(*image_dst_info));
+  if (!decoded_src_folder || !decoded_src || !decoded_image_folder ||
+      !decoded_image || !decoded_dst_path || !src_folder_abs ||
+      !image_folder_abs || !src_path || !image_abs || !image_dst_path ||
+      !src_info || !image_fs || !image_dst_info) {
+    strcpy(json_buff, "{\"error\":\"out of memory\"}");
+    goto cleanup;
+  }
+
+  for (int i = 0; i < iNumParams; i++) {
+    if (!strcmp(pcParam[i], "srcFolder")) src_folder = pcValue[i];
+    if (!strcmp(pcParam[i], "src")) src = pcValue[i];
+    if (!strcmp(pcParam[i], "folder")) image_folder = pcValue[i];
+    if (!strcmp(pcParam[i], "image")) image = pcValue[i];
+    if (!strcmp(pcParam[i], "dstPath")) dst_path_param = pcValue[i];
+  }
+
+  if (!src_folder || !src || !image_folder || !image || !dst_path_param) {
+    strcpy(json_buff, "{\"error\":\"missing parameters\"}");
+    goto cleanup;
+  }
+
+  if (!url_decode(src_folder, decoded_src_folder, MNGR_HTTPD_MAX_FOLDER_LEN) ||
+      !url_decode(src, decoded_src, MNGR_HTTPD_MAX_NAME_LEN) ||
+      !url_decode(image_folder, decoded_image_folder,
+                  MNGR_HTTPD_MAX_FOLDER_LEN) ||
+      !url_decode(image, decoded_image, MNGR_HTTPD_MAX_NAME_LEN) ||
+      !url_decode(dst_path_param, decoded_dst_path, MNGR_HTTPD_MAX_PATH_LEN) ||
+      !normalize_and_validate_path(decoded_src_folder, src_folder_abs,
+                                   MNGR_HTTPD_MAX_FOLDER_LEN) ||
+      !normalize_and_validate_path(decoded_image_folder, image_folder_abs,
+                                   MNGR_HTTPD_MAX_FOLDER_LEN) ||
+      !normalize_and_validate_path(decoded_dst_path, image_dst_path,
+                                   MNGR_HTTPD_MAX_PATH_LEN) ||
+      !join_root_folder_name(src_folder_abs, decoded_src, src_path,
+                             MNGR_HTTPD_MAX_PATH_LEN) ||
+      !join_root_folder_name(image_folder_abs, decoded_image, image_abs,
+                             MNGR_HTTPD_MAX_PATH_LEN)) {
+    strcpy(json_buff, "{\"error\":\"invalid source or image path\"}");
+    goto cleanup;
+  }
+
+  if (!stfs_can_write_filename(decoded_image)) {
+    strcpy(json_buff, "{\"error\":\"image must be .st.rw for imports\"}");
+    goto cleanup;
+  }
+
+  fr = f_stat(src_path, src_info);
+  if (fr != FR_OK) {
+    strcpy(json_buff, "{\"error\":\"source not found\"}");
+    goto cleanup;
+  }
+
+  if (ascii_streq_ci(src_path, image_abs) ||
+      ((src_info->fattrib & AM_DIR) && path_is_same_or_child_ci(image_abs, src_path))) {
+    strcpy(json_buff,
+           "{\"error\":\"cannot import a file or folder that contains the destination image\"}");
+    goto cleanup;
+  }
+
+  fr = stfs_open_rw(image_fs, image_abs);
+  if (fr != FR_OK) {
+    strcpy(json_buff, "{\"error\":\"image is not writable or not a FAT floppy\"}");
+    goto cleanup;
+  }
+
+  fr = stfs_stat(image_fs, image_dst_path, image_dst_info);
+  if (fr != FR_OK ||
+      !(strcmp(image_dst_path, "/") == 0 || (image_dst_info->attr & AM_DIR))) {
+    strcpy(json_buff, "{\"error\":\"destination folder not found inside image\"}");
+    goto cleanup;
+  }
+
+  stfs_close(image_fs);
+  image_fs = NULL;
+
+  if (!copy_start_to_image(src_path, image_abs, image_dst_path)) {
+    const char *start_error = copy_get_last_start_error_message();
+    snprintf(json_buff, sizeof(json_buff), "{\"error\":\"%s\"}",
+             (start_error && start_error[0] != '\0')
+                 ? start_error
+                 : "copy could not be started");
+    goto cleanup;
+  }
+  started = true;
+
+cleanup:
+  if (image_fs) stfs_close(image_fs);
+  free(image_dst_info);
+  free(image_fs);
+  free(src_info);
+  free(image_dst_path);
+  free(image_abs);
+  free(src_path);
+  free(image_folder_abs);
+  free(src_folder_abs);
+  free(decoded_dst_path);
+  free(decoded_image);
+  free(decoded_image_folder);
+  free(decoded_src);
+  free(decoded_src_folder);
   return started ? json_copy_status_response() : "/json.shtml";
 }
 
@@ -1484,11 +1696,13 @@ const char *cgi_download(int iIndex, int iNumParams, char *pcParam[],
   DPRINTF("cgi_download called with index %d\n", iIndex);
 
   if (copy_is_active()) {
-    static char error_url[MNGR_HTTPD_ERROR_URL_LEN];
-    snprintf(error_url, sizeof(error_url),
-             "/error.shtml?error=%d&error_msg=Copy%%20in%%20progress",
-             MNGR_HTTPD_RESPONSE_BAD_REQUEST);
-    return error_url;
+    strcpy(json_buff, "{\"error\":\"file operation in progress\"}");
+    return "/json.shtml";
+  }
+
+  if (download_job_active()) {
+    strcpy(json_buff, "{\"error\":\"download already in progress\"}");
+    return "/json.shtml";
   }
 
   char *decoded_folder = NULL;
@@ -1500,14 +1714,11 @@ const char *cgi_download(int iIndex, int iNumParams, char *pcParam[],
   folder_abs = httpd_alloc_str(MNGR_HTTPD_MAX_FOLDER_LEN);
   decoded_url = httpd_alloc_str(DOWNLOAD_BUFFLINE_SIZE);
   if (!decoded_folder || !folder_abs || !decoded_url) {
-    static char error_url[MNGR_HTTPD_ERROR_URL_LEN];
-    snprintf(error_url, sizeof(error_url),
-             "/error.shtml?error=%d&error_msg=Out%%20of%%20memory",
-             MNGR_HTTPD_RESPONSE_INTERNAL_SERVER_ERROR);
+    strcpy(json_buff, "{\"error\":\"out of memory\"}");
     free(decoded_url);
     free(folder_abs);
     free(decoded_folder);
-    return error_url;
+    return "/json.shtml";
   }
   for (int i = 0; i < iNumParams; i++) {
     if (strcmp(pcParam[i], "folder") == 0) {
@@ -1515,41 +1726,32 @@ const char *cgi_download(int iIndex, int iNumParams, char *pcParam[],
           !normalize_and_validate_path(decoded_folder, folder_abs,
                                        MNGR_HTTPD_MAX_FOLDER_LEN)) {
         DPRINTF("Invalid folder parameter: %s\n", pcValue[i]);
-        static char error_url[MNGR_HTTPD_ERROR_URL_LEN];
-        snprintf(error_url, sizeof(error_url),
-                 "/error.shtml?error=%d&error_msg=Invalid%%20folder",
-                 MNGR_HTTPD_RESPONSE_BAD_REQUEST);
+        strcpy(json_buff, "{\"error\":\"invalid folder\"}");
         free(decoded_url);
         free(folder_abs);
         free(decoded_folder);
-        return error_url;
+        return "/json.shtml";
       }
       has_folder = true;
     } else if (strcmp(pcParam[i], "url") == 0) {
       if (!url_decode(pcValue[i], decoded_url, DOWNLOAD_BUFFLINE_SIZE)) {
         DPRINTF("Invalid URL parameter: %s\n", pcValue[i]);
-        static char error_url[MNGR_HTTPD_ERROR_URL_LEN];
-        snprintf(error_url, sizeof(error_url),
-                 "/error.shtml?error=%d&error_msg=Invalid%%20url",
-                 MNGR_HTTPD_RESPONSE_BAD_REQUEST);
+        strcpy(json_buff, "{\"error\":\"invalid url\"}");
         free(decoded_url);
         free(folder_abs);
         free(decoded_folder);
-        return error_url;
+        return "/json.shtml";
       }
       has_url = true;
     }
   }
   if (!has_folder || !has_url) {
     DPRINTF("Missing folder or URL parameter\n");
-    static char error_url[MNGR_HTTPD_ERROR_URL_LEN];
-    snprintf(error_url, sizeof(error_url),
-             "/error.shtml?error=%d&error_msg=Bad%%20request",
-             MNGR_HTTPD_RESPONSE_BAD_REQUEST);
+    strcpy(json_buff, "{\"error\":\"bad request\"}");
     free(decoded_url);
     free(folder_abs);
     free(decoded_folder);
-    return error_url;
+    return "/json.shtml";
   }
   DPRINTF("Download request: folder=%s, url=%s\n", folder_abs, decoded_url);
   download_setDstFolder(folder_abs);
@@ -1559,7 +1761,17 @@ const char *cgi_download(int iIndex, int iNumParams, char *pcParam[],
   free(folder_abs);
   free(decoded_folder);
 
-  return "/downloading.shtml";
+  return json_download_status_response();
+}
+
+static const char *cgi_download_status(int iIndex, int iNumParams,
+                                       char *pcParam[], char *pcValue[]) {
+  LWIP_UNUSED_ARG(iIndex);
+  LWIP_UNUSED_ARG(iNumParams);
+  LWIP_UNUSED_ARG(pcParam);
+  LWIP_UNUSED_ARG(pcValue);
+
+  return json_download_status_response();
 }
 
 /**
@@ -2398,6 +2610,116 @@ cleanup:
   return ret;
 }
 
+static const char *cgi_img_ren(int iIndex, int iNumParams, char *pcParam[],
+                               char *pcValue[]) {
+  if (reject_if_copy_active()) return "/json.shtml";
+
+  LWIP_UNUSED_ARG(iIndex);
+
+  const char *folder = NULL, *image = NULL, *src_path_param = NULL,
+             *dst = NULL;
+  char *decoded_folder = NULL;
+  char *decoded_image = NULL;
+  char *decoded_src_path = NULL;
+  char *decoded_dst = NULL;
+  char *folder_abs = NULL;
+  char *image_abs = NULL;
+  stfs_t *image_fs = NULL;
+  stfs_dirent_t *source_info = NULL;
+  FRESULT fr = FR_OK;
+
+  decoded_folder = httpd_alloc_str(MNGR_HTTPD_MAX_FOLDER_LEN);
+  decoded_image = httpd_alloc_str(MNGR_HTTPD_MAX_NAME_LEN);
+  decoded_src_path = httpd_alloc_str(MNGR_HTTPD_MAX_PATH_LEN);
+  decoded_dst = httpd_alloc_str(MNGR_HTTPD_MAX_NAME_LEN);
+  folder_abs = httpd_alloc_str(MNGR_HTTPD_MAX_FOLDER_LEN);
+  image_abs = httpd_alloc_str(MNGR_HTTPD_MAX_PATH_LEN);
+  image_fs = calloc(1, sizeof(*image_fs));
+  source_info = calloc(1, sizeof(*source_info));
+  if (!decoded_folder || !decoded_image || !decoded_src_path || !decoded_dst ||
+      !folder_abs || !image_abs || !image_fs || !source_info) {
+    strcpy(json_buff, "{\"error\":\"out of memory\"}");
+    goto cleanup;
+  }
+
+  for (int i = 0; i < iNumParams; i++) {
+    if (!strcmp(pcParam[i], "folder")) folder = pcValue[i];
+    if (!strcmp(pcParam[i], "image")) image = pcValue[i];
+    if (!strcmp(pcParam[i], "srcPath")) src_path_param = pcValue[i];
+    if (!strcmp(pcParam[i], "dst")) dst = pcValue[i];
+  }
+
+  if (!folder || !image || !src_path_param || !dst) {
+    strcpy(json_buff, "{\"error\":\"missing parameters\"}");
+    goto cleanup;
+  }
+
+  if (!url_decode(folder, decoded_folder, MNGR_HTTPD_MAX_FOLDER_LEN) ||
+      !url_decode(image, decoded_image, MNGR_HTTPD_MAX_NAME_LEN) ||
+      !url_decode(src_path_param, decoded_src_path, MNGR_HTTPD_MAX_PATH_LEN) ||
+      !url_decode(dst, decoded_dst, MNGR_HTTPD_MAX_NAME_LEN) ||
+      !normalize_and_validate_path(decoded_folder, folder_abs,
+                                   MNGR_HTTPD_MAX_FOLDER_LEN) ||
+      !normalize_and_validate_path(decoded_src_path, decoded_src_path,
+                                   MNGR_HTTPD_MAX_PATH_LEN) ||
+      !join_root_folder_name(folder_abs, decoded_image, image_abs,
+                             MNGR_HTTPD_MAX_PATH_LEN)) {
+    strcpy(json_buff, "{\"error\":\"invalid source or image path\"}");
+    goto cleanup;
+  }
+
+  if (!stfs_can_write_filename(decoded_image)) {
+    strcpy(json_buff, "{\"error\":\"image must be .st.rw for rename\"}");
+    goto cleanup;
+  }
+  if (strcmp(decoded_src_path, "/") == 0) {
+    strcpy(json_buff, "{\"error\":\"cannot rename the image root\"}");
+    goto cleanup;
+  }
+  if (!stfs_is_canonical_sfn_name(decoded_dst)) {
+    strcpy(json_buff,
+           "{\"error\":\"image rename requires an uppercase 8.3 name\"}");
+    goto cleanup;
+  }
+
+  fr = stfs_open_rw(image_fs, image_abs);
+  if (fr != FR_OK) {
+    strcpy(json_buff, "{\"error\":\"image is not writable or not a FAT floppy\"}");
+    goto cleanup;
+  }
+
+  fr = stfs_stat(image_fs, decoded_src_path, source_info);
+  if (fr != FR_OK) {
+    strcpy(json_buff, "{\"error\":\"source path not found inside image\"}");
+    goto cleanup;
+  }
+
+  fr = stfs_rename(image_fs, decoded_src_path, decoded_dst);
+  if (fr == FR_EXIST) {
+    strcpy(json_buff, "{\"error\":\"destination already exists inside image\"}");
+  } else if (fr == FR_INVALID_NAME) {
+    strcpy(json_buff,
+           "{\"error\":\"image rename requires an uppercase 8.3 name\"}");
+  } else if (fr != FR_OK) {
+    snprintf(json_buff, sizeof(json_buff), "{\"error\":\"rename failed %d\"}",
+             (int)fr);
+  } else {
+    strcpy(json_buff, "{\"status\":\"renamed\"}");
+  }
+
+cleanup:
+  if (image_fs) stfs_close(image_fs);
+  free(source_info);
+  free(image_fs);
+  free(image_abs);
+  free(folder_abs);
+  free(decoded_dst);
+  free(decoded_src_path);
+  free(decoded_image);
+  free(decoded_folder);
+  return "/json.shtml";
+}
+
 // CGI: delete file
 // Delete file or directory only if directory is empty, unless recursive
 #ifndef MNGR_HTTPD_DELETE_MAX_DEPTH
@@ -2621,6 +2943,113 @@ cleanup:
   free(df);
   return "/json.shtml";
 }
+
+static const char *cgi_img_del(int iIndex, int iNumParams, char *pcParam[],
+                               char *pcValue[]) {
+  if (reject_if_copy_active()) return "/json.shtml";
+
+  const char *folder = NULL, *image = NULL, *src_path_param = NULL,
+             *recursive_param = NULL;
+  char *decoded_folder = NULL;
+  char *decoded_image = NULL;
+  char *decoded_src_path = NULL;
+  char *folder_abs = NULL;
+  char *image_abs = NULL;
+  stfs_t *image_fs = NULL;
+  stfs_dirent_t *source_info = NULL;
+  FRESULT fr = FR_OK;
+  bool recursive = false;
+
+  decoded_folder = httpd_alloc_str(MNGR_HTTPD_MAX_FOLDER_LEN);
+  decoded_image = httpd_alloc_str(MNGR_HTTPD_MAX_NAME_LEN);
+  decoded_src_path = httpd_alloc_str(MNGR_HTTPD_MAX_PATH_LEN);
+  folder_abs = httpd_alloc_str(MNGR_HTTPD_MAX_FOLDER_LEN);
+  image_abs = httpd_alloc_str(MNGR_HTTPD_MAX_PATH_LEN);
+  image_fs = calloc(1, sizeof(*image_fs));
+  source_info = calloc(1, sizeof(*source_info));
+  if (!decoded_folder || !decoded_image || !decoded_src_path || !folder_abs ||
+      !image_abs || !image_fs || !source_info) {
+    strcpy(json_buff, "{\"error\":\"out of memory\"}");
+    goto cleanup;
+  }
+
+  for (int i = 0; i < iNumParams; i++) {
+    if (!strcmp(pcParam[i], "folder")) folder = pcValue[i];
+    if (!strcmp(pcParam[i], "image")) image = pcValue[i];
+    if (!strcmp(pcParam[i], "srcPath")) src_path_param = pcValue[i];
+    if (!strcmp(pcParam[i], "recursive")) recursive_param = pcValue[i];
+  }
+
+  if (!folder || !image || !src_path_param) {
+    strcpy(json_buff, "{\"error\":\"missing parameters\"}");
+    goto cleanup;
+  }
+
+  recursive = recursive_param &&
+              !(strcmp(recursive_param, "0") == 0 ||
+                strcmp(recursive_param, "false") == 0);
+
+  if (!url_decode(folder, decoded_folder, MNGR_HTTPD_MAX_FOLDER_LEN) ||
+      !url_decode(image, decoded_image, MNGR_HTTPD_MAX_NAME_LEN) ||
+      !url_decode(src_path_param, decoded_src_path, MNGR_HTTPD_MAX_PATH_LEN) ||
+      !normalize_and_validate_path(decoded_folder, folder_abs,
+                                   MNGR_HTTPD_MAX_FOLDER_LEN) ||
+      !normalize_and_validate_path(decoded_src_path, decoded_src_path,
+                                   MNGR_HTTPD_MAX_PATH_LEN) ||
+      !join_root_folder_name(folder_abs, decoded_image, image_abs,
+                             MNGR_HTTPD_MAX_PATH_LEN)) {
+    strcpy(json_buff, "{\"error\":\"invalid source or image path\"}");
+    goto cleanup;
+  }
+
+  if (!stfs_can_write_filename(decoded_image)) {
+    strcpy(json_buff, "{\"error\":\"image must be .st.rw for deletes\"}");
+    goto cleanup;
+  }
+
+  if (strcmp(decoded_src_path, "/") == 0) {
+    strcpy(json_buff, "{\"error\":\"cannot delete the image root\"}");
+    goto cleanup;
+  }
+
+  fr = stfs_open_rw(image_fs, image_abs);
+  if (fr != FR_OK) {
+    strcpy(json_buff, "{\"error\":\"image is not writable or not a FAT floppy\"}");
+    goto cleanup;
+  }
+
+  fr = stfs_stat(image_fs, decoded_src_path, source_info);
+  if (fr != FR_OK) {
+    strcpy(json_buff, "{\"error\":\"source path not found inside image\"}");
+    goto cleanup;
+  }
+
+  fr = recursive ? stfs_delete_tree(image_fs, decoded_src_path)
+                 : stfs_delete(image_fs, decoded_src_path);
+  if (fr == FR_DENIED && (source_info->attr & AM_DIR) && !recursive) {
+    strcpy(json_buff,
+           "{\"error\":\"directory not empty\",\"directoryNotEmpty\":true}");
+  } else if (fr == FR_DENIED && (source_info->attr & AM_DIR) && recursive) {
+    strcpy(json_buff,
+           "{\"error\":\"recursive delete could not complete inside the image\"}");
+  } else if (fr != FR_OK) {
+    snprintf(json_buff, sizeof(json_buff), "{\"error\":\"delete failed %d\"}",
+             (int)fr);
+  } else {
+    strcpy(json_buff, "{\"status\":\"deleted\"}");
+  }
+
+cleanup:
+  if (image_fs) stfs_close(image_fs);
+  free(source_info);
+  free(image_fs);
+  free(image_abs);
+  free(folder_abs);
+  free(decoded_src_path);
+  free(decoded_image);
+  free(decoded_folder);
+  return "/json.shtml";
+}
 // CGI: set file attributes (hidden & read-only)
 static const char *cgi_attr(int iIndex, int iNumParams, char *pcParam[],
                             char *pcValue[]) {
@@ -2690,6 +3119,7 @@ static const tCGI cgi_handlers[] = {
     {"/test.cgi", cgi_test},
     {"/folder.cgi", cgi_folder},
     {"/download.cgi", cgi_download},
+    {"/download_status.cgi", cgi_download_status},
     {"/ls.cgi", cgi_ls},
     {"/img_ls.cgi", cgi_img_ls},
     {"/upload_start.cgi", cgi_upload_start},
@@ -2697,9 +3127,11 @@ static const tCGI cgi_handlers[] = {
     {"/upload_end.cgi", cgi_upload_end},
     {"/upload_cancel.cgi", cgi_upload_cancel},
     {"/ren.cgi", cgi_ren},
+    {"/img_ren.cgi", cgi_img_ren},
     {"/mkdir.cgi", cgi_mkdir},
     {"/copy_start.cgi", cgi_copy_start},
     {"/img_copy_start.cgi", cgi_img_copy_start},
+    {"/img_import_start.cgi", cgi_img_import_start},
     {"/move_start.cgi", cgi_move_start},
     {"/copy_status.cgi", cgi_copy_status},
     {"/copy_cancel.cgi", cgi_copy_cancel},
@@ -2708,6 +3140,7 @@ static const tCGI cgi_handlers[] = {
     {"/mkst.cgi", cgi_mkst},
     {"/floppy_convert.cgi", cgi_floppy_convert},
     {"/del.cgi", cgi_del},
+    {"/img_del.cgi", cgi_img_del},
     {"/attr.cgi", cgi_attr},
     {"/download_start.cgi", cgi_download_start},
     {"/download_chunk.cgi", cgi_download_chunk},
@@ -2948,36 +3381,7 @@ static u16_t ssi_handler(int iIndex, char *pcInsert, int iInsertLen
       }
       break;
     }
-    case 8: /* DWNLDSTS */
-    {
-      download_status_t status = download_getStatus();
-
-      switch (status) {
-        case DOWNLOAD_STATUS_IDLE:
-        case DOWNLOAD_STATUS_COMPLETED:
-          printed = snprintf(pcInsert, iInsertLen, "%s",
-                             "<meta http-equiv='refresh' "
-                             "content='0;url=/browser_home.shtml'>");
-          break;
-          break;
-        case DOWNLOAD_STATUS_FAILED:
-          printed = snprintf(
-              pcInsert, iInsertLen,
-              "<meta http-equiv='refresh' "
-              "content='0;url=/"
-              "error.shtml?error=%d&error_msg=Download%%20error:%%20%s'>",
-              status, download_getErrorString());
-          break;
-          break;
-        default:
-          printed = snprintf(
-              pcInsert, iInsertLen, "%s",
-              "<meta http-equiv='refresh' content='5;url=/downloading.shtml'>");
-          break;
-      }
-      break;
-    }
-    case 9: /* TITLEHDR */
+    case 8: /* TITLEHDR */
     {
 #if _DEBUG == 0
       printed = snprintf(pcInsert, iInsertLen, "%s (%s)", BROWSER_TITLE,
