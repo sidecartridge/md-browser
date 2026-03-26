@@ -6,6 +6,8 @@
  * Description: HTTPD server functions for manager httpd
  */
 
+#include <inttypes.h>
+
 #include "mngr_httpd.h"
 #include "include/floppy.h"
 #include "include/stfs.h"
