@@ -38,9 +38,9 @@
         itemsCount: 0,
         totalLetters: 0,
         search: '',
-        labels: [],       // unique labels for combo box
-        selectedLabel: '', // filter by this label
-        showNew: true,    // only show newest entries when checked
+        labels: [],
+        selectedLabel: '',
+        navMenuOpen: false,
         returningToBooster: false,
         boosterConfirmVisible: false,
         boosterLaunchingVisible: false,
@@ -48,21 +48,92 @@
         bannerVisible: false,
         bannerType: 'info',
         bannerMessage: '',
-        // returns entries matching the search query
-        filteredEntries() {
-          const q = this.search.toLowerCase();
-          let list = this.parsedEntries.filter(e => {
-            if (!e.name.toLowerCase().startsWith(q)) return false;
-            if (this.selectedLabel && e.label !== this.selectedLabel) return false;
-            return true;
-          });
-          if (this.showNew) {
-            list = list.filter(e => e.time);
-            list.sort((a, b) => Number(b.time) - Number(a.time));
-          }
-          return list;
+        remoteDownloadVisible: false,
+        remoteDownloadFolder: '/',
+        remoteDownloadUrl: '',
+        remoteDownloadStatus: 'idle',
+        remoteDownloadPollTimer: null,
+        normalizedSearch() {
+          return String(this.search || '').trim().toLowerCase();
         },
-
+        hasActiveFilters() {
+          return !!(this.normalizedSearch() || this.selectedLabel);
+        },
+        clearFilters() {
+          this.search = '';
+          this.selectedLabel = '';
+        },
+        entryMatchesFilters(entry, includeLabel = true) {
+          const q = this.normalizedSearch();
+          const name = String((entry && entry.name) || '').toLowerCase();
+          if (q && !name.includes(q)) return false;
+          if (includeLabel && this.selectedLabel && entry.label !== this.selectedLabel) return false;
+          return true;
+        },
+        filteredNewEntries() {
+          return this.parsedEntries
+            .filter(entry => !!entry.time && this.entryMatchesFilters(entry))
+            .sort((a, b) => Number(b.time) - Number(a.time));
+        },
+        filteredArchiveEntries() {
+          return this.parsedEntries
+            .filter(entry => !entry.time && this.entryMatchesFilters(entry))
+            .sort((a, b) => String(a.name).localeCompare(String(b.name)));
+        },
+        recentDisplayEntries() {
+          const limit = this.hasActiveFilters() ? 18 : 12;
+          return this.filteredNewEntries().slice(0, limit);
+        },
+        archiveDisplayEntries() {
+          return this.filteredArchiveEntries().slice(0, 80);
+        },
+        recentResultsTruncated() {
+          const limit = this.hasActiveFilters() ? 18 : 12;
+          return this.filteredNewEntries().length > limit;
+        },
+        archiveResultsTruncated() {
+          return this.filteredArchiveEntries().length > 80;
+        },
+        archiveExploreEnabled() {
+          return this.hasActiveFilters();
+        },
+        taxonomyLabels() {
+          const counts = new Map();
+          this.parsedEntries.forEach(entry => {
+            if (!entry.label || !this.entryMatchesFilters(entry, false)) return;
+            counts.set(entry.label, (counts.get(entry.label) || 0) + 1);
+          });
+          const labels = Array.from(counts.entries())
+            .map(([name, count]) => ({ name, count }))
+            .sort((a, b) => (b.count - a.count) || a.name.localeCompare(b.name));
+          if (this.selectedLabel && !labels.some(label => label.name === this.selectedLabel)) {
+            labels.unshift({ name: this.selectedLabel, count: 0 });
+          }
+          return labels;
+        },
+        totalFilteredCount() {
+          return this.filteredNewEntries().length + this.filteredArchiveEntries().length;
+        },
+        summaryText() {
+          if (!this.hasActiveFilters()) {
+            return `Tracking ${this.filteredNewEntries().length} recent arrivals and ${this.filteredArchiveEntries().length} archive entries.`;
+          }
+          return `${this.totalFilteredCount()} matches across recent arrivals and archive.`;
+        },
+        formatEntryTime(ts) {
+          if (!ts) return '';
+          return new Date(Number(ts) * 1000).toLocaleDateString();
+        },
+        recentSectionDescription() {
+          return this.hasActiveFilters()
+            ? 'Recent arrivals matching the current search and taxonomy filters.'
+            : 'Latest additions to the public floppy database.';
+        },
+        archiveSectionDescription() {
+          return this.hasActiveFilters()
+            ? 'Archive matches from the main catalog.'
+            : 'Use the search box or taxonomy chips to explore the full archive.';
+        },
         init() {
           if (this.initialized) return;
           this.initialized = true;
@@ -110,7 +181,7 @@
           }
           this.currentLetter = '';
           // collect unique labels
-          const set = new Set(this.parsedEntries.map(e => e.label));
+          const set = new Set(this.parsedEntries.map(e => e.label).filter(Boolean));
           this.labels = Array.from(set).sort();
           this.loaded = true;
         }
@@ -155,6 +226,90 @@
         closeBrowser() {
           this.folderBrowserOpen = false;
           this.folderList = [];
+        },
+        clearRemoteDownloadPollTimer() {
+          if (this.remoteDownloadPollTimer) {
+            clearTimeout(this.remoteDownloadPollTimer);
+            this.remoteDownloadPollTimer = null;
+          }
+        },
+        resetRemoteDownloadState() {
+          this.clearRemoteDownloadPollTimer();
+          this.remoteDownloadVisible = false;
+          this.remoteDownloadFolder = '/';
+          this.remoteDownloadUrl = '';
+          this.remoteDownloadStatus = 'idle';
+        },
+        remoteDownloadStatusMessage() {
+          switch (this.remoteDownloadStatus) {
+            case 'requested':
+              return 'Queued. The device will start the transfer shortly.';
+            case 'not_started':
+              return 'Preparing the remote download.';
+            case 'started':
+              return 'Connecting to the remote server.';
+            case 'in_progress':
+              return 'Downloading to the microSD card…';
+            default:
+              return 'Waiting for the download to finish.';
+          }
+        },
+        scheduleRemoteDownloadPoll(delay = 1000) {
+          this.clearRemoteDownloadPollTimer();
+          this.remoteDownloadPollTimer = setTimeout(() => this.pollRemoteDownload(), delay);
+        },
+        async pollRemoteDownload() {
+          try {
+            const res = await fetch('/download_status.cgi', { cache: 'no-store' });
+            const result = res.ok ? await res.json() : { error: 'unable to read download status' };
+            if (result.error) {
+              this.resetRemoteDownloadState();
+              this.showBanner('Download status failed: ' + result.error, 'error');
+              return;
+            }
+            this.remoteDownloadStatus = result.status || 'idle';
+            this.remoteDownloadFolder = result.folder || this.remoteDownloadFolder;
+            this.remoteDownloadUrl = result.url || this.remoteDownloadUrl;
+            if (this.remoteDownloadStatus === 'failed') {
+              this.resetRemoteDownloadState();
+              this.showBanner(result.error || 'Download failed.', 'error');
+              return;
+            }
+            if (this.remoteDownloadStatus === 'idle' || this.remoteDownloadStatus === 'completed') {
+              this.resetRemoteDownloadState();
+              return;
+            }
+            this.scheduleRemoteDownloadPoll(1000);
+          } catch (_) {
+            this.resetRemoteDownloadState();
+            this.showBanner('Download status failed', 'error');
+          }
+        },
+        async startRemoteDownload(url, folder = this.currentFolder || '/') {
+          const sourceUrl = String(url || '').trim();
+          const targetFolder = folder || '/';
+          if (!sourceUrl) return;
+          if (this.remoteDownloadVisible) {
+            this.showBanner('A download is already in progress.', 'warning');
+            return;
+          }
+          try {
+            const res = await fetch(`/download.cgi?folder=${encodeURIComponent(targetFolder)}` +
+              `&url=${encodeURIComponent(sourceUrl)}`, { cache: 'no-store' });
+            const result = res.ok ? await res.json() : { error: 'unable to start download' };
+            if (result.error) {
+              this.showBanner('Download failed to start: ' + result.error, 'error');
+              return;
+            }
+            this.closeBrowser();
+            this.remoteDownloadFolder = result.folder || targetFolder;
+            this.remoteDownloadUrl = result.url || sourceUrl;
+            this.remoteDownloadStatus = result.status || 'requested';
+            this.remoteDownloadVisible = true;
+            this.scheduleRemoteDownloadPoll(600);
+          } catch (_) {
+            this.showBanner('Download failed to start', 'error');
+          }
         },
         showBanner(message, type = 'info') {
           this.bannerMessage = message;
@@ -232,41 +387,61 @@
 
 </head>
 
-<body x-data="appManager()" x-init="init()">
-  <!-- Green Banner Header -->
-  <header class="header">
-    <h1><!--#TITLEHDR--></h1>
+<body class="browser-page" x-data="appManager()" x-init="init()">
+  <header class="app-header">
+    <div class="app-header-inner">
+      <div class="app-header-copy">
+        <span class="app-header-kicker">SidecarTridge Multi-device</span>
+        <h1><!--#TITLEHDR--></h1>
+      </div>
+      <button type="button" class="app-nav-toggle" aria-controls="primaryNav"
+        :aria-expanded="navMenuOpen ? 'true' : 'false'" @click="navMenuOpen = !navMenuOpen">
+        <i class="fas" :class="navMenuOpen ? 'fa-xmark' : 'fa-bars'"></i>
+        <span x-text="navMenuOpen ? 'Close' : 'Menu'"></span>
+      </button>
+    </div>
   </header>
 
-  <!-- Navigation Bar -->
-  <nav class="nav-bar">
-    <div class="pure-menu pure-menu-horizontal">
-      <ul class="pure-menu-list">
-        <li class="pure-menu-item pure-menu-selected">
-          <a href="#" class="pure-menu-link">Floppy DB</a>
-        </li>
-        <li class="pure-menu-item">
-          <a href="/fmanager_home.shtml" class="pure-menu-link">File Manager</a>
-        </li>
-        <li class="pure-menu-item">
-          <a href="https://docs.sidecartridge.com/sidecartridge-multidevice/publicfloppydb/#how-to-contribute"
-            target="_blank" class="pure-menu-link">Contribute</a>
-        </li>
-        <li class="pure-menu-item">
-          <a href="https://docs.sidecartridge.com/sidecartridge-multidevice/microfirmwares/browser/" target="_blank"
-            class="pure-menu-link">Help</a>
-        </li>
-        <li class="pure-menu-item">
-          <a href="#" class="pure-menu-link booster-menu-link" :class="{'is-disabled': returningToBooster}"
-            @click.prevent="openBoosterConfirm()" x-text="returningToBooster ? 'Returning…' : 'Return to Booster'"></a>
-        </li>
-      </ul>
+  <nav id="primaryNav" class="app-nav" :class="{'is-open': navMenuOpen}">
+    <div class="app-nav-inner">
+      <a href="#" class="app-nav-link is-active" aria-current="page">Floppy DB</a>
+      <a href="/fmanager_home.shtml" class="app-nav-link" @click="navMenuOpen = false">File Manager</a>
+      <a href="https://docs.sidecartridge.com/sidecartridge-multidevice/publicfloppydb/#how-to-contribute"
+        target="_blank" class="app-nav-link" @click="navMenuOpen = false">Contribute</a>
+      <a href="https://docs.sidecartridge.com/sidecartridge-multidevice/microfirmwares/browser/" target="_blank"
+        class="app-nav-link" @click="navMenuOpen = false">Help</a>
+      <a href="#" class="app-nav-link app-nav-link-booster" :class="{'is-disabled': returningToBooster}"
+        @click.prevent="navMenuOpen = false; openBoosterConfirm()"
+        x-text="returningToBooster ? 'Returning…' : 'Return to Booster'"></a>
     </div>
   </nav>
 
   <!-- Main Content Area -->
-  <main class="main-content">
-    <h2>Floppy Image database</h2>
+  <main class="main-content browser-main">
+    <section class="browser-hero">
+      <div class="browser-hero-copy">
+        <span class="browser-kicker">Public Floppy Database</span>
+        <h2>Explore new homebrew software alongside the timeless classics.</h2>
+        <p>
+          The database moves in two directions: fresh uploads and the classic releases preserved in crew collections.
+          Use What&apos;s New for the latest arrivals, and the search engine to revisit old favorites.
+        </p>
+      </div>
+      <div class="browser-stat-grid">
+        <div class="browser-stat-card">
+          <span>Recent</span>
+          <strong x-text="parsedEntries.filter(entry => !!entry.time).length"></strong>
+        </div>
+        <div class="browser-stat-card">
+          <span>Archive</span>
+          <strong x-text="parsedEntries.filter(entry => !entry.time).length"></strong>
+        </div>
+        <div class="browser-stat-card">
+          <span>Labels</span>
+          <strong x-text="labels.length"></strong>
+        </div>
+      </div>
+    </section>
     <div x-show="bannerVisible" class="banner" :class="{
       'banner-success': bannerType === 'success',
       'banner-error': bannerType === 'error',
@@ -277,56 +452,131 @@
       <span x-text="bannerMessage"></span>
       <button class="banner-close" aria-label="Close" @click="closeBanner()">&times;</button>
     </div>
-    <p>
-      Please type the name of the application you want to find in the database. The database will be filtered to show
-      only the applications that match your search.
-    </p>
-    <p>
-      To download the application, click on the link and confirm the folder to download before proceeding with the
-      download.
-    </p>
     <!-- SD card found. Display search results -->
     <div x-show="<!--#SDCARDB--> === true">
-      <div x-show="!loaded" class="loading-status">
-        <p>Loading... items loaded: <strong><span x-text="itemsCount"></span></strong></p>
-      </div>
-      <div x-show="loaded" class="file-contents">
-        <div class="filter-controls">
-          <input type="text" x-model="search" placeholder="Type the application name to find..."
-            title="Type the application name to find" class="pure-input-1" />
-          <select x-model="selectedLabel" class="pure-input-1">
-            <option value="">Filter by label</option>
-            <template x-for="lbl in labels" :key="lbl">
-              <option :value="lbl" x-text="lbl"></option>
-            </template>
-          </select>
-          <label class="pure-checkbox" style="display: flex; align-items: center;">
-            <input type="checkbox" x-model="showNew" />
-            <span style="margin-left: 0.5rem;">What's new</span>
-          </label>
-        </div>
-        <template x-if="search || selectedLabel || showNew">
-          <div class="search-results">
-            <template x-for="(entry, idx) in filteredEntries()" :key="idx">
-              <div class="entry">
-                <div class="entry-header" style="display: flex; align-items: center; gap: 0.5rem;">
-                  <h4 x-text="entry.name"></h4>
-                  <ul class="app-tags">
-                    <template x-if="entry.label">
-                      <li x-text="entry.label"></li>
-                    </template>
-                  </ul>
-                </div>
-                <p x-show="entry.time"><strong>Added:</strong> <span
-                    x-text="new Date(Number(entry.time) * 1000).toLocaleString()"></span></p>
-                <div class="entry-action" style="text-align: right;">
-                  <button type="button" class="pure-button" @click="openBrowser(entry.path)">Save To...</button>
-                </div>
-              </div>
-            </template>
-            <p x-show="filteredEntries().length === 0">No matching entries.</p>
+      <div x-show="!loaded" class="browser-loading">
+        <div class="browser-loading-card">
+          <i class="fas fa-spinner fa-spin"></i>
+          <div>
+            <strong>Indexing floppy database…</strong>
+            <p>Loaded <span x-text="itemsCount"></span> items so far.</p>
           </div>
-        </template>
+        </div>
+      </div>
+      <div x-show="loaded" class="browser-shell">
+        <section class="browser-filter-panel">
+          <div class="browser-search-row">
+            <label class="browser-search-field">
+              <i class="fas fa-magnifying-glass"></i>
+              <input type="text" x-model="search" placeholder="Search by title…"
+                title="Search by application title" />
+            </label>
+            <button type="button" class="pure-button" x-show="hasActiveFilters()" @click="clearFilters()">Clear
+              Filters</button>
+          </div>
+          <div class="browser-taxonomy">
+            <button type="button" class="taxonomy-chip" :class="{'active': !selectedLabel}"
+              @click="selectedLabel = ''">
+              <span>All Labels</span>
+              <strong x-text="parsedEntries.filter(entry => entryMatchesFilters(entry, false)).length"></strong>
+            </button>
+            <template x-for="label in taxonomyLabels()" :key="label.name">
+              <button type="button" class="taxonomy-chip" :class="{'active': selectedLabel === label.name}"
+                @click="selectedLabel = selectedLabel === label.name ? '' : label.name">
+                <span x-text="label.name"></span>
+                <strong x-text="label.count"></strong>
+              </button>
+            </template>
+          </div>
+          <p class="browser-summary" x-text="summaryText()"></p>
+        </section>
+
+        <section class="browser-section">
+          <div class="browser-section-head">
+            <div>
+              <span class="browser-section-kicker">Recent</span>
+              <h3>What’s New</h3>
+            </div>
+            <span class="browser-count-badge" x-text="filteredNewEntries().length"></span>
+          </div>
+          <p class="browser-section-copy" x-text="recentSectionDescription()"></p>
+          <template x-if="recentDisplayEntries().length > 0">
+            <div class="browser-card-grid">
+              <template x-for="(entry, idx) in recentDisplayEntries()" :key="entry.path + '-recent-' + idx">
+                <article class="browser-entry-card browser-entry-featured">
+                  <div class="browser-entry-featured-main">
+                    <div class="browser-entry-topline">
+                      <span class="browser-entry-date" x-text="formatEntryTime(entry.time)"></span>
+                      <span class="browser-entry-tag" x-show="entry.label" x-text="entry.label"></span>
+                    </div>
+                    <h4 x-text="entry.name"></h4>
+                    <p class="browser-entry-path" x-text="entry.path"></p>
+                  </div>
+                  <div class="browser-entry-actions browser-entry-actions-rail">
+                    <button type="button" class="browser-download-button"
+                      @click.prevent.stop="openBrowser(entry.path)" aria-label="Download to folder">
+                      <span class="fas fa-download" aria-hidden="true"></span>
+                    </button>
+                  </div>
+                </article>
+              </template>
+            </div>
+          </template>
+          <p class="browser-inline-note" x-show="recentResultsTruncated()">Showing the first recent matches. Narrow the
+            search or choose a taxonomy chip to focus the list.</p>
+          <template x-if="recentDisplayEntries().length === 0">
+            <div class="browser-empty-state">
+              <i class="fas fa-box-open"></i>
+              <p>No recent arrivals match the current filters.</p>
+            </div>
+          </template>
+        </section>
+
+        <section class="browser-section browser-section-archive">
+          <div class="browser-section-head">
+            <div>
+              <span class="browser-section-kicker">Archive</span>
+              <h3>Main Catalog</h3>
+            </div>
+            <span class="browser-count-badge" x-text="filteredArchiveEntries().length"></span>
+          </div>
+          <p class="browser-section-copy" x-text="archiveSectionDescription()"></p>
+          <template x-if="archiveExploreEnabled() && archiveDisplayEntries().length > 0">
+            <div class="browser-list">
+              <template x-for="(entry, idx) in archiveDisplayEntries()" :key="entry.path + '-archive-' + idx">
+                <article class="browser-entry-row">
+                  <div class="browser-entry-row-main">
+                    <div class="browser-entry-row-title">
+                      <h4 x-text="entry.name"></h4>
+                      <span class="browser-entry-tag" x-show="entry.label" x-text="entry.label"></span>
+                    </div>
+                    <p class="browser-entry-path" x-text="entry.path"></p>
+                  </div>
+                  <div class="browser-entry-actions browser-entry-actions-rail">
+                    <button type="button" class="browser-download-button"
+                      @click.prevent.stop="openBrowser(entry.path)" aria-label="Download to folder">
+                      <span class="fas fa-download" aria-hidden="true"></span>
+                    </button>
+                  </div>
+                </article>
+              </template>
+            </div>
+          </template>
+          <p class="browser-inline-note" x-show="archiveExploreEnabled() && archiveResultsTruncated()">Showing the first
+            80 archive matches. Refine the search or taxonomy to narrow it down.</p>
+          <template x-if="!archiveExploreEnabled()">
+            <div class="browser-empty-state browser-empty-state-muted">
+              <i class="fas fa-tags"></i>
+              <p>Use the search box or taxonomy chips to explore the full archive without flooding the page.</p>
+            </div>
+          </template>
+          <template x-if="archiveExploreEnabled() && archiveDisplayEntries().length === 0">
+            <div class="browser-empty-state">
+              <i class="fas fa-folder-open"></i>
+              <p>No archive entries match the current filters.</p>
+            </div>
+          </template>
+        </section>
       </div>
     </div>
 
@@ -383,12 +633,26 @@
           </li>
         </template>
       </ul>
-      <form class="pure-form" action="/download.cgi" method="GET">
-        <input type="hidden" name="folder" :value="currentFolder" />
-        <input type="hidden" name="url" :value="baseDownloadUrl + selectedFile" />
-        <button type="submit" class="pure-button pure-button-primary">Download Here</button>
+      <div class="modal-buttons">
+        <button type="button" class="pure-button pure-button-primary"
+          @click="startRemoteDownload(baseDownloadUrl + selectedFile, currentFolder)">Download Here</button>
         <button type="button" class="pure-button" @click="closeBrowser()">Cancel</button>
-      </form>
+      </div>
+    </div>
+  </div>
+  <div x-show="remoteDownloadVisible" x-cloak class="modal">
+    <div class="modal-overlay"></div>
+    <div class="modal-content booster-confirm-modal remote-download-modal">
+      <div class="remote-download-content">
+        <i class="fas fa-spinner fa-spin modal-info-icon remote-download-icon"></i>
+        <div>
+          <h3>Downloading…</h3>
+          <p>The selected image is being downloaded to the microSD card.</p>
+          <p><strong>Destination:</strong> <code x-text="remoteDownloadFolder || '/'"></code></p>
+          <p class="remote-download-source"><strong>Source:</strong> <code x-text="remoteDownloadUrl"></code></p>
+          <p class="remote-download-status" x-text="remoteDownloadStatusMessage()"></p>
+        </div>
+      </div>
     </div>
   </div>
 
