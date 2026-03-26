@@ -258,8 +258,7 @@
         </li>
         <li class="pure-menu-item">
           <a href="#" class="pure-menu-link booster-menu-link" :class="{'is-disabled': returningToBooster}"
-            @click.prevent="openBoosterConfirm()"
-            x-text="returningToBooster ? 'Returning…' : 'Return to Booster'"></a>
+            @click.prevent="openBoosterConfirm()" x-text="returningToBooster ? 'Returning…' : 'Return to Booster'"></a>
         </li>
       </ul>
     </div>
@@ -395,7 +394,7 @@
 
   <!-- Footer information in-page -->
   <footer class="footer">
-    <p>&copy; 2025 GOODDATA LABS SLU. All rights reserved.</p>
+    <p>&copy; 2025-26 GOODDATA LABS SLU. All rights reserved.</p>
   </footer>
 
 </body>

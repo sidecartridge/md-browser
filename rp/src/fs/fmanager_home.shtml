@@ -28,6 +28,17 @@
         items: [],
         folderLoading: false,
         folderLoadToken: 0,
+        imageMode: false,
+        imageFile: '',
+        imagePath: '/',
+        imageMeta: {
+          fat: 0,
+          totalBytes: 0,
+          freeBytes: 0,
+          tracks: 0,
+          sides: 0,
+          sectorsPerTrack: 0
+        },
         // Upload in progress flag
         uploading: false,
         // Default sort: by name ascending
@@ -51,12 +62,22 @@
         convertSourceItem: {},
         convertTargetFile: '',
         convertMode: '',
+        deleteDialogVisible: false,
+        deleteInProgress: false,
+        deleteNeedsRecursive: false,
+        deleteFolder: '/',
+        deleteItemData: {},
         copyDestinationVisible: false,
         copyProgressVisible: false,
         copyStarting: false,
         copyCancelling: false,
+        copyAutoCloseOnFinish: false,
         copyOperation: 'copy',
+        copyLastDestinationFolder: '',
+        copySourceMode: 'host',
         copySourceFolder: '/',
+        copySourceImageHostFolder: '/',
+        copySourceImageFile: '',
         copySourceItem: {},
         copyDestinationFolder: '/',
         copyDestinationList: [],
@@ -91,9 +112,53 @@
         bannerVisible: false,
         bannerType: 'info',
         bannerMessage: '',
-        load(offset = 0, folder = this.folder, loadToken = null, pendingItems = null) {
+        currentViewFolder() {
+          return this.imageMode ? (this.imagePath || '/') : (this.folder || '/');
+        },
+        canBrowseImageItem(item) {
+          return !!(item && item.n && !(item.a & 0x10) && /\.st(\.rw)?$/i.test(item.n || ''));
+        },
+        resetImageMeta() {
+          this.imageMeta = {
+            fat: 0,
+            totalBytes: 0,
+            freeBytes: 0,
+            tracks: 0,
+            sides: 0,
+            sectorsPerTrack: 0
+          };
+        },
+        imageGeometrySummary() {
+          const parts = [];
+          if (this.imageMeta.tracks) parts.push(`${this.imageMeta.tracks} tracks`);
+          if (this.imageMeta.sides) parts.push(`${this.imageMeta.sides} sides`);
+          if (this.imageMeta.sectorsPerTrack) parts.push(`${this.imageMeta.sectorsPerTrack} sectors/track`);
+          return parts.join(' · ');
+        },
+        closeImage(reload = true) {
+          this.imageMode = false;
+          this.imageFile = '';
+          this.imagePath = '/';
+          this.resetImageMeta();
+          this.detailVisible = false;
+          this.detailFile = {};
+          if (reload) this.load(0, this.folder || '/');
+        },
+        openImage(item) {
+          if (!this.canBrowseImageItem(item)) return;
+          this.detailVisible = false;
+          this.imageMode = true;
+          this.imageFile = item.n;
+          this.imagePath = '/';
+          this.resetImageMeta();
+          this.load(0, '/');
+        },
+        load(offset = 0, folder = this.currentViewFolder(), loadToken = null, pendingItems = null) {
           const targetFolder = folder || '/';
           const nextOffset = Number(offset || 0);
+          const currentImageMode = this.imageMode;
+          const currentHostFolder = this.folder || '/';
+          const currentImageFile = this.imageFile || '';
           let activeToken = loadToken;
           let nextItems = pendingItems;
 
@@ -106,13 +171,54 @@
             nextItems = [];
           }
 
-          const url = `/ls.cgi?folder=${encodeURIComponent(targetFolder)}` + (nextOffset ? `&nextItem=${nextOffset}` : '');
+          const url = currentImageMode
+            ? `/img_ls.cgi?folder=${encodeURIComponent(currentHostFolder)}` +
+              `&image=${encodeURIComponent(currentImageFile)}` +
+              `&path=${encodeURIComponent(targetFolder)}` +
+              (nextOffset ? `&nextItem=${nextOffset}` : '')
+            : `/ls.cgi?folder=${encodeURIComponent(targetFolder)}` + (nextOffset ? `&nextItem=${nextOffset}` : '');
           fetch(url)
             .then(res => res.ok ? res.json() : [])
             .then(data => {
-              if (activeToken !== this.folderLoadToken || targetFolder !== this.folder) return;
+              let pageItems = null;
+              let pageMeta = null;
+              const targetStillCurrent = currentImageMode
+                ? this.imageMode && currentHostFolder === this.folder &&
+                  currentImageFile === this.imageFile && targetFolder === this.imagePath
+                : !this.imageMode && targetFolder === this.folder;
+              if (activeToken !== this.folderLoadToken || !targetStillCurrent) return;
+              if (currentImageMode && data && !Array.isArray(data) && Array.isArray(data.items)) {
+                pageItems = data.items.slice();
+                pageMeta = data.meta || null;
+              } else if (Array.isArray(data)) {
+                pageItems = data.slice();
+              } else {
+                this.items = [];
+                this.folderLoading = false;
+                if (currentImageMode) {
+                  this.showBanner('Open image failed: ' + ((data && data.error) || 'unable to browse image'), 'error');
+                  this.closeImage();
+                }
+                return;
+              }
+              if (currentImageMode) {
+                this.imageMeta = pageMeta ? {
+                  fat: Number(pageMeta.fat || 0),
+                  totalBytes: Number(pageMeta.totalBytes || 0),
+                  freeBytes: Number(pageMeta.freeBytes || 0),
+                  tracks: Number(pageMeta.tracks || 0),
+                  sides: Number(pageMeta.sides || 0),
+                  sectorsPerTrack: Number(pageMeta.sectorsPerTrack || 0)
+                } : {
+                  fat: 0,
+                  totalBytes: 0,
+                  freeBytes: 0,
+                  tracks: 0,
+                  sides: 0,
+                  sectorsPerTrack: 0
+                };
+              }
               let more = false;
-              const pageItems = Array.isArray(data) ? data.slice() : [];
               // Check for sentinel empty object indicating more data
               if (pageItems.length && Object.keys(pageItems[pageItems.length - 1]).length === 0) {
                 more = true;
@@ -127,14 +233,22 @@
               this.folderLoading = false;
             })
             .catch(() => {
-              if (activeToken !== this.folderLoadToken || targetFolder !== this.folder) return;
+              const targetStillCurrent = currentImageMode
+                ? this.imageMode && currentHostFolder === this.folder &&
+                  currentImageFile === this.imageFile && targetFolder === this.imagePath
+                : !this.imageMode && targetFolder === this.folder;
+              if (activeToken !== this.folderLoadToken || !targetStillCurrent) return;
               this.items = [];
               this.folderLoading = false;
+              if (currentImageMode) {
+                this.showBanner('Open image failed', 'error');
+                this.closeImage();
+              }
             });
         },
         // Initialize by clearing and loading from offset 0
         init() {
-          this.load(0, this.folder);
+          this.load(0);
           this.pollCopyStatus(true);
         },
         toggleSort(key) {
@@ -195,6 +309,23 @@
           return `${base}/${name}`;
         },
         navigate(name) {
+          if (this.imageMode) {
+            let newFolder = '/';
+            if (name === '..') {
+              if (this.imagePath === '/') {
+                this.closeImage();
+                return;
+              }
+              const parts = this.imagePath.replace(/\/$/, '').split('/');
+              parts.pop();
+              newFolder = parts.join('/') || '/';
+            } else {
+              newFolder = this.imagePath.replace(/\/$/, '') + '/' + name;
+            }
+            this.imagePath = newFolder;
+            this.load(0, newFolder);
+            return;
+          }
           let newFolder = '/';
           if (name === '..') {
             const parts = this.folder.replace(/\/$/, '').split('/');
@@ -271,19 +402,79 @@
           this.uploading = false;
           this.uploads = [];
         },
-        // Handler to delete a file or folder directly from list; shift-click skips confirmation
-        deleteItem(item, ev) {
-          const skipConfirm = ev && ev.shiftKey;
-          if (!skipConfirm && !confirm('Delete ' + item.n + '?')) {
-            return;
+        resetDeleteDialog() {
+          this.deleteDialogVisible = false;
+          this.deleteInProgress = false;
+          this.deleteNeedsRecursive = false;
+          this.deleteFolder = this.folder || '/';
+          this.deleteItemData = {};
+        },
+        deleteIsDirectory() {
+          return !!(this.deleteItemData && (this.deleteItemData.a & 0x10));
+        },
+        deleteTargetPathPreview() {
+          return this.deleteItemData && this.deleteItemData.n
+            ? this.joinFolderAndName(this.deleteFolder || '/', this.deleteItemData.n)
+            : '';
+        },
+        deleteDialogTitle() {
+          if (this.deleteNeedsRecursive) return 'Delete Folder Recursively';
+          return this.deleteIsDirectory() ? 'Delete Folder' : 'Delete File';
+        },
+        deleteDialogMessage() {
+          if (this.deleteNeedsRecursive) {
+            return 'This folder is not empty. Recursive delete will remove the folder and all of its contents permanently.';
           }
-          fetch(`/del.cgi?folder=${encodeURIComponent(this.folder)}` +
-            `&src=${encodeURIComponent(item.n)}`)
-            .then(res => res.json())
-            .then(r => {
-              if (r.error) alert('Delete failed: ' + r.error);
-              else this.load(0);
-            });
+          return this.deleteIsDirectory()
+            ? 'Delete this folder. If it is not empty, you will be offered a recursive delete option.'
+            : 'Delete this file permanently.';
+        },
+        openDeleteDialog(item, ev = null) {
+          if (!item || !item.n || this.imageMode) return;
+          this.detailVisible = false;
+          this.deleteFolder = this.folder || '/';
+          this.deleteItemData = Object.assign({}, item);
+          this.deleteNeedsRecursive = false;
+          this.deleteDialogVisible = !(ev && ev.shiftKey);
+          this.deleteInProgress = false;
+          if (ev && ev.shiftKey) {
+            this.confirmDelete(false, true);
+          }
+        },
+        closeDeleteDialog() {
+          if (this.deleteInProgress) return;
+          this.resetDeleteDialog();
+        },
+        async confirmDelete(recursive = false, startedImmediate = false) {
+          if (this.deleteInProgress || !this.deleteItemData || !this.deleteItemData.n) return;
+          this.deleteInProgress = true;
+          try {
+            const res = await fetch(`/del.cgi?folder=${encodeURIComponent(this.deleteFolder || '/')}` +
+              `&src=${encodeURIComponent(this.deleteItemData.n)}` +
+              `&recursive=${recursive ? 1 : 0}`);
+            const result = await res.json();
+            if (result.error) {
+              if (result.directoryNotEmpty) {
+                this.deleteNeedsRecursive = true;
+                this.deleteDialogVisible = true;
+                return;
+              }
+              this.showBanner('Delete failed: ' + result.error, 'error');
+              if (!this.deleteDialogVisible && startedImmediate) {
+                this.resetDeleteDialog();
+              }
+              return;
+            }
+            this.resetDeleteDialog();
+            this.load(0);
+          } catch (_) {
+            this.showBanner('Delete failed', 'error');
+            if (!this.deleteDialogVisible && startedImmediate) {
+              this.resetDeleteDialog();
+            }
+          } finally {
+            this.deleteInProgress = false;
+          }
         },
         // Inline rename handler for list rows
         renameItem(item) {
@@ -405,10 +596,13 @@
           }
         },
         resetCopySelection() {
+          this.copySourceMode = 'host';
           this.copySourceFolder = '/';
+          this.copySourceImageHostFolder = '/';
+          this.copySourceImageFile = '';
           this.copySourceItem = {};
           this.copyOperation = 'copy';
-          this.copyDestinationFolder = this.folder || '/';
+          this.copyDestinationFolder = this.preferredCopyDestinationFolder();
           this.copyDestinationList = [];
           this.copyStarting = false;
           this.copyCancelling = false;
@@ -447,6 +641,12 @@
         copyOperationLower(operation = this.copyOperation) {
           return operation === 'move' ? 'move' : 'copy';
         },
+        preferredCopyDestinationFolder() {
+          return this.copyLastDestinationFolder || this.folder || '/';
+        },
+        copySourceIsImage() {
+          return this.copySourceMode === 'image';
+        },
         copyOperationProgressLabel(operation = this.copyOperation) {
           return operation === 'move' ? 'Moving' : 'Copying';
         },
@@ -470,6 +670,12 @@
           }
         },
         copySourcePathPreview() {
+          if (this.copySourceIsImage()) {
+            const srcPath = this.copySourceItem && this.copySourceItem.n
+              ? this.joinFolderAndName(this.copySourceFolder || '/', this.copySourceItem.n)
+              : (this.copySourceFolder || '/');
+            return `${this.copySourceImageFile || 'image'} @ ${srcPath}`;
+          }
           return this.copySourceItem && this.copySourceItem.n
             ? this.joinFolderAndName(this.copySourceFolder || '/', this.copySourceItem.n)
             : '';
@@ -500,6 +706,7 @@
           this.copyLastNotifiedStatus = '';
           this.copyProgressVisible = false;
           this.copyCancelling = false;
+          this.copyAutoCloseOnFinish = false;
         },
         scheduleCopyPoll() {
           this.clearCopyPollTimer();
@@ -527,7 +734,38 @@
             }
           }
         },
-        async openCopyDialog(item) {
+        async openCopyDialog(item, event = null) {
+          if (!item || !item.n) return;
+          if (this.imageMode) {
+            await this.openImageCopyDialog(item, event);
+            return;
+          }
+          if (this.copyStatusActive()) {
+            this.showBanner('A file operation is already in progress.', 'warning');
+            return;
+          }
+          if (this.copyStatusTerminal()) await this.resetCopyStatus();
+          this.detailVisible = false;
+          this.copyAutoCloseOnFinish = !!(event && event.shiftKey);
+          this.copyOperation = 'copy';
+          this.copySourceMode = 'host';
+          this.copyLastNotifiedStatus = '';
+          this.copyDestinationLoading = false;
+          this.copySourceFolder = this.folder || '/';
+          this.copySourceImageHostFolder = '/';
+          this.copySourceImageFile = '';
+          this.copySourceItem = Object.assign({}, item);
+          this.copyDestinationFolder = this.preferredCopyDestinationFolder();
+          this.copyDestinationVisible = !(event && event.shiftKey);
+          this.copyStarting = false;
+          this.copyCancelling = false;
+          if (event && event.shiftKey) {
+            await this.startCopy();
+            return;
+          }
+          await this.loadCopyDestinationFolders(this.copyDestinationFolder);
+        },
+        async openImageCopyDialog(item, event = null) {
           if (!item || !item.n) return;
           if (this.copyStatusActive()) {
             this.showBanner('A file operation is already in progress.', 'warning');
@@ -535,15 +773,23 @@
           }
           if (this.copyStatusTerminal()) await this.resetCopyStatus();
           this.detailVisible = false;
+          this.copyAutoCloseOnFinish = !!(event && event.shiftKey);
           this.copyOperation = 'copy';
+          this.copySourceMode = 'image';
           this.copyLastNotifiedStatus = '';
           this.copyDestinationLoading = false;
-          this.copySourceFolder = this.folder || '/';
+          this.copySourceFolder = this.imagePath || '/';
+          this.copySourceImageHostFolder = this.folder || '/';
+          this.copySourceImageFile = this.imageFile || '';
           this.copySourceItem = Object.assign({}, item);
-          this.copyDestinationFolder = this.folder || '/';
-          this.copyDestinationVisible = true;
+          this.copyDestinationFolder = this.preferredCopyDestinationFolder();
+          this.copyDestinationVisible = !(event && event.shiftKey);
           this.copyStarting = false;
           this.copyCancelling = false;
+          if (event && event.shiftKey) {
+            await this.startCopy();
+            return;
+          }
           await this.loadCopyDestinationFolders(this.copyDestinationFolder);
         },
         async openMoveDialog(item) {
@@ -554,12 +800,16 @@
           }
           if (this.copyStatusTerminal()) await this.resetCopyStatus();
           this.detailVisible = false;
+          this.copyAutoCloseOnFinish = false;
           this.copyOperation = 'move';
+          this.copySourceMode = 'host';
           this.copyLastNotifiedStatus = '';
           this.copyDestinationLoading = false;
           this.copySourceFolder = this.folder || '/';
+          this.copySourceImageHostFolder = '/';
+          this.copySourceImageFile = '';
           this.copySourceItem = Object.assign({}, item);
-          this.copyDestinationFolder = this.folder || '/';
+          this.copyDestinationFolder = this.preferredCopyDestinationFolder();
           this.copyDestinationVisible = true;
           this.copyStarting = false;
           this.copyCancelling = false;
@@ -586,22 +836,36 @@
           this.copyLastNotifiedStatus = '';
           try {
             if (this.copyStatusTerminal()) await this.resetCopyStatus();
-            const endpoint = this.copyOperation === 'move' ? '/move_start.cgi' : '/copy_start.cgi';
+            const endpoint = this.copySourceIsImage()
+              ? '/img_copy_start.cgi'
+              : (this.copyOperation === 'move' ? '/move_start.cgi' : '/copy_start.cgi');
             const operationLabel = this.copyOperationLabel();
-            const res = await fetch(`${endpoint}?srcFolder=${encodeURIComponent(this.copySourceFolder || '/')}` +
-              `&src=${encodeURIComponent(this.copySourceItem.n)}` +
-              `&dstFolder=${encodeURIComponent(this.copyDestinationFolder || '/')}`);
+            let res = null;
+            if (this.copySourceIsImage()) {
+              const srcPath = this.joinFolderAndName(this.copySourceFolder || '/', this.copySourceItem.n);
+              res = await fetch(`${endpoint}?folder=${encodeURIComponent(this.copySourceImageHostFolder || '/')}` +
+                `&image=${encodeURIComponent(this.copySourceImageFile || '')}` +
+                `&srcPath=${encodeURIComponent(srcPath)}` +
+                `&dstFolder=${encodeURIComponent(this.copyDestinationFolder || '/')}`);
+            } else {
+              res = await fetch(`${endpoint}?srcFolder=${encodeURIComponent(this.copySourceFolder || '/')}` +
+                `&src=${encodeURIComponent(this.copySourceItem.n)}` +
+                `&dstFolder=${encodeURIComponent(this.copyDestinationFolder || '/')}`);
+            }
             const result = await res.json();
             if (result.error) {
+              this.copyAutoCloseOnFinish = false;
               this.showBanner(`${operationLabel} failed to start: ` + result.error, 'error');
               return;
             }
+            this.copyLastDestinationFolder = this.copyDestinationFolder || '/';
             this.applyCopyStatus(result);
             this.copyDestinationVisible = false;
             this.copyProgressVisible = true;
             this.resetCopySelection();
             this.scheduleCopyPoll();
           } catch (_) {
+            this.copyAutoCloseOnFinish = false;
             this.showBanner(`${this.copyOperationLabel()} failed to start`, 'error');
           } finally {
             this.copyStarting = false;
@@ -646,7 +910,7 @@
               return;
             }
             if (this.copyStatusTerminal()) {
-              this.copyProgressVisible = true;
+              this.copyProgressVisible = !this.copyAutoCloseOnFinish;
               if (this.copyLastNotifiedStatus !== this.copyStatus.status) {
                 const operationLabel = this.copyOperationLabel(this.copyStatus.operation);
                 if (this.copyStatus.status === 'completed') {
@@ -659,6 +923,9 @@
                   this.showBanner(`${operationLabel} failed: ` + (this.copyStatus.error || 'unknown error'), 'error');
                 }
                 this.copyLastNotifiedStatus = this.copyStatus.status;
+              }
+              if (this.copyAutoCloseOnFinish) {
+                await this.resetCopyStatus();
               }
             }
           } catch (_) {
@@ -680,14 +947,7 @@
             });
         },
         deleteFile() {
-          if (!confirm('Delete ' + this.detailFile.n + '?')) return;
-          fetch(`/del.cgi?folder=${encodeURIComponent(this.folder)}` +
-            `&src=${encodeURIComponent(this.detailFile.n)}`)
-            .then(res => res.json())
-            .then(r => {
-              if (r.error) alert('Delete failed: ' + r.error);
-              else { this.closeDetails(); this.load(0); }
-            });
+          this.openDeleteDialog(this.detailFile);
         },
         // Handler to download a file in chunks and assemble for user download
         async downloadFile() {
@@ -1018,21 +1278,50 @@
       </p>
       <div style="margin-top:1rem; display:flex; gap:0.5rem; justify-content:center;">
         <!-- Toggle Hidden and Read-only -->
-        <button class="pure-button" @click="toggleHidden()">
+        <button class="pure-button" x-show="!imageMode" @click="toggleHidden()">
           <span x-text="(detailFile.a & 0x02) ? 'Unhide' : 'Hide'"></span>
         </button>
-        <button class="pure-button" @click="toggleReadonly()">
+        <button class="pure-button" x-show="!imageMode" @click="toggleReadonly()">
           <span x-text="(detailFile.a & 0x01) ? 'Writable' : 'Read-only'"></span>
         </button>
         <!-- File operations -->
-        <button class="pure-button" x-show="canConvertFileItem(detailFile)" @click="openConvertDialog(detailFile)"
+        <button class="pure-button" x-show="!imageMode && canBrowseImageItem(detailFile)" @click="openImage(detailFile)">Browse Image</button>
+        <button class="pure-button" x-show="!imageMode && canConvertFileItem(detailFile)" @click="openConvertDialog(detailFile)"
           x-text="convertActionLabelForName(detailFile.n)"></button>
-        <button class="pure-button" @click="openCopyDialog(detailFile)">Copy</button>
-        <button class="pure-button" @click="openMoveDialog(detailFile)">Move</button>
-        <button class="pure-button pure-button-primary" @click="renameFile()">Rename</button>
-        <button class="pure-button pure-button-success" @click="downloadFile()">Download</button>
-        <button class="pure-button pure-button-danger" @click="deleteFile()">Delete</button>
+        <button class="pure-button" x-show="!imageMode" @click="openCopyDialog(detailFile, $event)">Copy</button>
+        <button class="pure-button" x-show="imageMode" @click="openImageCopyDialog(detailFile, $event)">Copy to SD</button>
+        <button class="pure-button" x-show="!imageMode" @click="openMoveDialog(detailFile)">Move</button>
+        <button class="pure-button pure-button-primary" x-show="!imageMode" @click="renameFile()">Rename</button>
+        <button class="pure-button pure-button-success" x-show="!imageMode" @click="downloadFile()">Download</button>
+        <button class="pure-button pure-button-danger" x-show="!imageMode" @click="openDeleteDialog(detailFile, $event)">Delete</button>
         <button class="pure-button" @click="closeDetails()">Close</button>
+      </div>
+      <p x-show="imageMode" class="copy-modal-help">Read-only browsing inside the floppy image. Files and folders can be copied out to the microSD.</p>
+    </div>
+  </div>
+  <!-- Delete confirmation modal -->
+  <div x-show="deleteDialogVisible" x-cloak class="modal">
+    <div class="modal-overlay" @click="closeDeleteDialog()"></div>
+    <div class="modal-content delete-modal">
+      <h3 x-text="deleteDialogTitle()"></h3>
+      <p><strong>Target:</strong> <code x-text="deleteTargetPathPreview()"></code></p>
+      <p class="copy-modal-help" x-text="deleteDialogMessage()"></p>
+      <p class="text-warning" x-show="deleteNeedsRecursive">
+        Recursive delete cannot be undone.
+      </p>
+      <div class="modal-buttons">
+        <button type="button" class="pure-button" :disabled="deleteInProgress"
+          @click="closeDeleteDialog()">Cancel</button>
+        <button type="button" class="pure-button pure-button-danger"
+          x-show="!deleteNeedsRecursive"
+          :disabled="deleteInProgress"
+          @click="confirmDelete(false)"
+          x-text="deleteInProgress ? 'Deleting…' : 'Delete'"></button>
+        <button type="button" class="pure-button pure-button-warning"
+          x-show="deleteNeedsRecursive"
+          :disabled="deleteInProgress"
+          @click="confirmDelete(true)"
+          x-text="deleteInProgress ? 'Deleting…' : 'Delete Recursively'"></button>
       </div>
     </div>
   </div>
@@ -1045,7 +1334,8 @@
       <p><strong>Target:</strong> <code x-text="convertTargetPathPreview()"></code></p>
       <p class="copy-modal-help" x-text="convertDialogHelp()"></p>
       <div class="modal-buttons">
-        <button type="button" class="pure-button" :disabled="convertingDisk" @click="closeConvertDialog()">Cancel</button>
+        <button type="button" class="pure-button" :disabled="convertingDisk"
+          @click="closeConvertDialog()">Cancel</button>
         <button type="button" class="pure-button pure-button-primary" :disabled="convertingDisk"
           @click="startConvertDisk()" x-text="convertingDisk ? 'Converting…' : 'Convert'"></button>
       </div>
@@ -1056,19 +1346,23 @@
     <div class="detail-modal-content disk-modal-content">
       <h3>Create Blank ST Image</h3>
       <div class="disk-size-grid">
-        <button type="button" class="disk-size-option" :class="{active: newDiskType === '360KB'}" @click="newDiskType = '360KB'">
+        <button type="button" class="disk-size-option" :class="{active: newDiskType === '360KB'}"
+          @click="newDiskType = '360KB'">
           <strong>360KB (DS)</strong>
           <span>40 tracks · 2 sides · 9 sectors</span>
         </button>
-        <button type="button" class="disk-size-option" :class="{active: newDiskType === '720KB'}" @click="newDiskType = '720KB'">
+        <button type="button" class="disk-size-option" :class="{active: newDiskType === '720KB'}"
+          @click="newDiskType = '720KB'">
           <strong>720KB (DD)</strong>
           <span>80 tracks · 2 sides · 9 sectors</span>
         </button>
-        <button type="button" class="disk-size-option" :class="{active: newDiskType === '1.44MB'}" @click="newDiskType = '1.44MB'">
+        <button type="button" class="disk-size-option" :class="{active: newDiskType === '1.44MB'}"
+          @click="newDiskType = '1.44MB'">
           <strong>1.44MB (HD)</strong>
           <span>80 tracks · 2 sides · 18 sectors</span>
         </button>
-        <button type="button" class="disk-size-option" :class="{active: newDiskType === '2.88MB'}" @click="newDiskType = '2.88MB'">
+        <button type="button" class="disk-size-option" :class="{active: newDiskType === '2.88MB'}"
+          @click="newDiskType = '2.88MB'">
           <strong>2.88MB (ED)</strong>
           <span>80 tracks · 2 sides · 36 sectors</span>
         </button>
@@ -1076,7 +1370,8 @@
       <label for="diskLabelInput" class="disk-field-label">Volume name</label>
       <input id="diskLabelInput" class="disk-label-input" type="text" maxlength="12" placeholder="DISK.001"
         x-model="newDiskLabel" @input="newDiskLabel = sanitizeDiskLabel(newDiskLabel)" />
-      <p class="disk-field-help">Optional. Old FAT-style 8.3 uppercase with a dot, for example <code>DISK.001</code>.</p>
+      <p class="disk-field-help">Optional. Old FAT-style 8.3 uppercase with a dot, for example <code>DISK.001</code>.
+      </p>
       <fieldset class="disk-format-group">
         <legend class="disk-field-label">File extension</legend>
         <label class="disk-format-option" :class="{active: newDiskExtension === 'st'}">
@@ -1096,11 +1391,13 @@
       </fieldset>
       <label for="diskFileNameInput" class="disk-field-label">File name</label>
       <div class="disk-file-input-group">
-        <input id="diskFileNameInput" class="disk-label-input disk-file-input" type="text" maxlength="96" placeholder="My Blank Disk"
-          x-model="newDiskFileName" @input="newDiskFileName = sanitizeDiskFileName(newDiskFileName)" />
+        <input id="diskFileNameInput" class="disk-label-input disk-file-input" type="text" maxlength="96"
+          placeholder="My Blank Disk" x-model="newDiskFileName"
+          @input="newDiskFileName = sanitizeDiskFileName(newDiskFileName)" />
         <span class="disk-fixed-ext" x-text="diskFileExtension()"></span>
       </div>
-      <p class="disk-field-help">Required. Long file names are allowed. The selected extension is appended automatically.</p>
+      <p class="disk-field-help">Required. Long file names are allowed. The selected extension is appended
+        automatically.</p>
       <div class="disk-preview-row">
         <span>Geometry</span>
         <strong x-text="diskTypeGeometry(newDiskType)"></strong>
@@ -1119,7 +1416,8 @@
       </div>
       <div class="disk-modal-actions">
         <button class="pure-button" @click="closeCreateDiskMenu()">Cancel</button>
-        <button class="pure-button pure-button-primary" :disabled="creatingDisk || !fileNameValid() || !volumeLabelValid()" @click="createBlankDisk()"
+        <button class="pure-button pure-button-primary"
+          :disabled="creatingDisk || !fileNameValid() || !volumeLabelValid()" @click="createBlankDisk()"
           x-text="creatingDisk ? 'Creating…' : 'Create image'"></button>
       </div>
     </div>
@@ -1146,7 +1444,8 @@
           </li>
         </template>
       </ul>
-      <p class="copy-modal-help" x-text="`Choose the destination folder, then confirm to start the ${copyOperationLower()}.`"></p>
+      <p class="copy-modal-help"
+        x-text="copySourceIsImage() ? 'Choose the destination folder on the microSD, then confirm to export the selected file or folder from the image.' : `Choose the destination folder, then confirm to start the ${copyOperationLower()}.`"></p>
       <div class="modal-buttons">
         <button type="button" class="pure-button" @click="closeCopyDialog()">Cancel</button>
         <button type="button" class="pure-button pure-button-primary" :disabled="copyStarting || copyDestinationLoading"
@@ -1160,7 +1459,8 @@
       <h3 x-text="copyProgressHeading()"></h3>
       <p class="copy-progress-path"><strong>Source:</strong> <code x-text="copyStatus.src"></code></p>
       <p class="copy-progress-path"><strong>Destination:</strong> <code x-text="copyStatus.dst"></code></p>
-      <p class="copy-progress-path" x-show="copyStatus.current"><strong>Current:</strong> <code x-text="copyStatus.current"></code></p>
+      <p class="copy-progress-path" x-show="copyStatus.current"><strong>Current:</strong> <code
+          x-text="copyStatus.current"></code></p>
       <template x-if="copyStatus.status === 'scanning'">
         <div>
           <progress class="pure-progress" max="100" style="width:100%;"></progress>
@@ -1176,20 +1476,22 @@
       <div class="copy-summary-grid">
         <div><span>Files</span><strong x-text="`${copyStatus.filesDone} / ${copyStatus.filesTotal}`"></strong></div>
         <div><span>Folders</span><strong x-text="`${copyStatus.dirsDone} / ${copyStatus.dirsTotal}`"></strong></div>
-        <div><span>Bytes</span><strong x-text="`${formatBytes(copyStatus.bytesDone)} / ${formatBytes(copyStatus.bytesTotal)}`"></strong></div>
-        <div><span>Current file</span><strong x-text="`${formatBytes(copyStatus.currentFileDone)} / ${formatBytes(copyStatus.currentFileSize)}`"></strong></div>
+        <div><span>Bytes</span><strong
+            x-text="`${formatBytes(copyStatus.bytesDone)} / ${formatBytes(copyStatus.bytesTotal)}`"></strong></div>
+        <div><span>Current file</span><strong
+            x-text="`${formatBytes(copyStatus.currentFileDone)} / ${formatBytes(copyStatus.currentFileSize)}`"></strong>
+        </div>
       </div>
       <p class="text-error" x-show="copyStatus.status === 'failed'"
         x-text="copyStatus.error || `${copyOperationLabel(copyStatus.operation)} failed.`"></p>
       <p class="text-warning" x-show="copyStatus.status === 'cancelled'"
         x-text="`${copyOperationLabel(copyStatus.operation)} cancelled.`"></p>
       <div class="modal-buttons">
-        <button type="button" class="pure-button pure-button-warning"
-          x-show="copyStatusActive()"
-          :disabled="copyCancelling || copyStatus.cancelRequested"
-          @click="cancelCopy()"
+        <button type="button" class="pure-button pure-button-warning" x-show="copyStatusActive()"
+          :disabled="copyCancelling || copyStatus.cancelRequested" @click="cancelCopy()"
           x-text="copyStatus.cancelRequested ? 'Cancelling…' : `Cancel ${copyOperationLabel(copyStatus.operation)}`"></button>
-        <button type="button" class="pure-button" x-show="copyStatusTerminal()" @click="closeCopyProgress()">Close</button>
+        <button type="button" class="pure-button" x-show="copyStatusTerminal() && !copyAutoCloseOnFinish"
+          @click="closeCopyProgress()">Close</button>
       </div>
     </div>
   </div>
@@ -1228,8 +1530,7 @@
         </li>
         <li class="pure-menu-item">
           <a href="#" class="pure-menu-link booster-menu-link" :class="{'is-disabled': returningToBooster}"
-            @click.prevent="openBoosterConfirm()"
-            x-text="returningToBooster ? 'Returning…' : 'Return to Booster'"></a>
+            @click.prevent="openBoosterConfirm()" x-text="returningToBooster ? 'Returning…' : 'Return to Booster'"></a>
         </li>
       </ul>
     </div>
@@ -1249,13 +1550,24 @@
       <button class="banner-close" aria-label="Close" @click="closeBanner()">&times;</button>
     </div>
     <!-- Breadcrumb and navigation -->
-    <p>Folder: <strong x-text="folder || '/' "></strong></p>
+    <p>Folder: <strong x-text="folder || '/'"></strong></p>
     <div style="margin:1rem 0; display:flex; gap:0.5rem;">
       <input type="file" x-ref="fileInput" style="display:none" multiple @change="uploadFiles($event)" />
-      <button class="pure-button pure-button-primary" @click="$refs.fileInput.click()">Upload Files</button>
-      <button class="pure-button" @click="uploadUrl()">Upload from URL</button>
-      <button class="pure-button" @click="createFolder()">New Folder</button>
-      <button class="pure-button" @click="openCreateDiskMenu()">Blank ST Image</button>
+      <button class="pure-button pure-button-primary" :disabled="imageMode" @click="$refs.fileInput.click()">Upload Files</button>
+      <button class="pure-button" :disabled="imageMode" @click="uploadUrl()">Upload from URL</button>
+      <button class="pure-button" :disabled="imageMode" @click="createFolder()">New Folder</button>
+      <button class="pure-button" :disabled="imageMode" @click="openCreateDiskMenu()">Blank ST Image</button>
+    </div>
+    <div x-show="imageMode" class="image-browse-strip">
+      <span class="image-browse-strip-label">Inside image</span>
+      <code x-text="imageFile"></code>
+      <span class="image-browse-strip-sep">@</span>
+      <code x-text="imagePath || '/'"></code>
+      <span x-show="imageGeometrySummary()" class="image-browse-strip-meta" x-text="imageGeometrySummary()"></span>
+      <span x-show="imageMeta.totalBytes > 0" class="image-browse-strip-meta"
+        x-text="`${formatBytes(imageMeta.totalBytes)} total`"></span>
+      <span x-show="imageMeta.totalBytes > 0" class="image-browse-strip-meta"
+        x-text="`${formatBytes(imageMeta.freeBytes)} free`"></span>
     </div>
 
     <table class="pure-table pure-table-horizontal" style="margin-top:1rem; width:100%;">
@@ -1277,9 +1589,12 @@
           </tr>
         </template>
         <!-- Go up row -->
-        <template x-if="!folderLoading && folder !== '/'">
+        <template x-if="!folderLoading && (imageMode || folder !== '/')">
           <tr class="clickable-row" @click="navigate('..')">
-            <td colspan="3"><i class="fas fa-level-up-alt"></i> ..</td>
+            <td colspan="3">
+              <i class="fas" :class="imageMode && imagePath === '/' ? 'fa-sign-out-alt' : 'fa-level-up-alt'"></i>
+              <span x-text="imageMode && imagePath === '/' ? 'Exit image' : '..'"></span>
+            </td>
             <td></td>
           </tr>
         </template>
@@ -1300,16 +1615,22 @@
             <td x-text="item.s"></td>
             <td x-text="formatTs(item.t)"></td>
             <td>
-              <span class="action-icons">
-                <i class="fas fa-retweet convert-icon"
-                  :class="{ 'convert-icon-disabled': !canConvertFileItem(item) }"
+              <span class="action-icons" x-show="!imageMode">
+                <i class="fas fa-folder-open browse-image-icon"
+                  :class="{ 'browse-image-icon-disabled': !canBrowseImageItem(item) }"
+                  :title="canBrowseImageItem(item) ? 'Browse image' : 'Browse image unavailable for this file type'"
+                  @click.stop="openImage(item)"></i>
+                <i class="fas fa-retweet convert-icon" :class="{ 'convert-icon-disabled': !canConvertFileItem(item) }"
                   :title="canConvertFileItem(item) ? convertTooltipForName(item.n) : 'Convert floppy image unavailable for this file type'"
                   @click.stop="openConvertDialog(item)"></i>
-                <i class="fas fa-copy copy-icon" title="Copy" @click.stop="openCopyDialog(item)"></i>
+                <i class="fas fa-copy copy-icon" title="Copy (Shift-click to start immediately)" @click.stop="openCopyDialog(item, $event)"></i>
                 <i class="fas fa-arrow-right move-icon" title="Move" @click.stop="openMoveDialog(item)"></i>
                 <i class="fas fa-edit rename-icon" @click.stop="renameItem(item)"></i>
-                <i class="fas fa-trash delete-icon" title="Delete (Shift-click to skip confirmation)"
-                  @click.stop="deleteItem(item, $event)"></i>
+                <i class="fas fa-trash delete-icon" title="Delete (Shift-click to delete immediately if possible)"
+                  @click.stop="openDeleteDialog(item, $event)"></i>
+              </span>
+              <span class="action-icons" x-show="imageMode">
+                <i class="fas fa-copy copy-icon" title="Copy to microSD (Shift-click to start immediately)" @click.stop="openImageCopyDialog(item, $event)"></i>
               </span>
             </td>
           </tr>
@@ -1346,7 +1667,7 @@
   </div>
   <!-- Footer information in-page -->
   <footer class="footer">
-    <p>&copy; 2025 GOODDATA LABS SLU. All rights reserved.</p>
+    <p>&copy; 2025-26 GOODDATA LABS SLU. All rights reserved.</p>
   </footer>
 
 </body>

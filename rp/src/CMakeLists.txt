@@ -156,6 +156,7 @@ target_sources(${PROJECT_NAME} PRIVATE
         sdcard.c
         select.c
         floppy.c
+        stfs.c
         usb_descriptors.c
         usb_mass.c
         tusb_config.h
