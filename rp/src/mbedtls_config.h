@@ -137,8 +137,13 @@
 #define MBEDTLS_ASN1_WRITE_C  // for MBEDTLS_ECDSA_C
 
 // Debug
-#define MBEDTLS_DEBUG_C        // Debug functions
-#define MBEDTLS_SSL_DEBUG_ALL  // Debug output
+// TLS debug tracing is disabled: it floods the serial console and costs
+// flash/latency. To debug a TLS handshake, uncomment both defines below.
+// Do NOT gate them on _DEBUG: the SDK-built mbedTLS library objects do
+// not see that macro (added after pico_sdk_init), and the two halves
+// must agree on MBEDTLS_DEBUG_C or the link breaks.
+// #define MBEDTLS_DEBUG_C        // Debug functions
+// #define MBEDTLS_SSL_DEBUG_ALL  // Debug output
 
 // #define MBEDTLS_MPI_MAX_SIZE 256 // Default might be 512 or more
 
