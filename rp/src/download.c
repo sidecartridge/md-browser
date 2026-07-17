@@ -8,6 +8,8 @@
 
 #include "download.h"
 
+#include <strings.h>
+
 // Download
 static FIL file;
 static download_status_t downloadStatus = DOWNLOAD_STATUS_IDLE;
@@ -19,6 +21,11 @@ static char dst_folder[DOWNLOAD_BUFFLINE_SIZE] = {0};
 static char filepath[DOWNLOAD_BUFFLINE_SIZE] = {0};
 static int lastHttpStatus = 0;       // Last HTTP status seen (0 = none yet)
 static bool httpStatusFailed = false;  // Failure caused by a non-2xx status
+static const char *downloadErrorOverride = NULL;  // Specific error message
+static int redirectHops = 0;          // Redirects followed for this download
+static bool redirectPending = false;  // A Location target awaits re-issue
+static char redirectUrl[DOWNLOAD_BUFFLINE_SIZE] = {0};
+static char savedFilename[DOWNLOAD_FILENAME_SIZE] = {0};
 
 // Close and remove the destination file after a failed transfer so no
 // partial or bogus content (error pages, redirect stubs) is left behind.
@@ -26,6 +33,51 @@ static void cleanupFailedDownloadFile(void) {
   f_close(&file);
   if (filepath[0] != '\0') {
     f_unlink(filepath);
+  }
+}
+
+// Find a "Location:" header (case-insensitive, at line start) in the raw
+// response headers and copy its value into out. Returns false if absent,
+// empty or too long.
+static bool findLocationHeader(const char *headers, char *out, size_t outLen) {
+  const char *line = headers;
+  while (line != NULL && *line != '\0') {
+    if (strncasecmp(line, "Location:", 9) == 0) {
+      const char *value = line + 9;
+      while (*value == ' ' || *value == '\t') {
+        value++;
+      }
+      size_t len = strcspn(value, "\r\n");
+      if (len == 0 || len >= outLen) {
+        return false;
+      }
+      memcpy(out, value, len);
+      out[len] = '\0';
+      return true;
+    }
+    line = strstr(line, "\r\n");
+    if (line != NULL) {
+      line += 2;
+    }
+  }
+  return false;
+}
+
+// Resolve a Location value against the request that produced it: absolute
+// URLs pass through; host-relative ("/path") and path-relative targets are
+// rebuilt from the current protocol/host/URI.
+static void resolveRedirectUrl(const char *location, char *out,
+                               size_t outLen) {
+  if (strstr(location, "://") != NULL) {
+    snprintf(out, outLen, "%s", location);
+  } else if (location[0] == '/') {
+    snprintf(out, outLen, "%s://%s%s", components.protocol, components.host,
+             location);
+  } else {
+    const char *lastSlash = strrchr(components.uri, '/');
+    int baseLen = lastSlash ? (int)(lastSlash - components.uri) + 1 : 0;
+    snprintf(out, outLen, "%s://%s%.*s%s", components.protocol,
+             components.host, baseLen, components.uri, location);
   }
 }
 
@@ -184,6 +236,28 @@ static err_t httpClientHeaderCheckSizeFn(__unused httpc_state_t *connection,
   }
   lastHttpStatus = httpStatus;
 
+  // Redirect statuses: capture the Location target and abort this
+  // transfer; download_poll re-issues the request to the new URL (D-03).
+  if (httpStatus == 301 || httpStatus == 302 || httpStatus == 303 ||
+      httpStatus == 307 || httpStatus == 308) {
+    if (redirectHops >= DOWNLOAD_MAX_REDIRECT_HOPS) {
+      DPRINTF("Redirect limit (%d) exceeded\n", DOWNLOAD_MAX_REDIRECT_HOPS);
+      downloadErrorOverride = "Too many redirects";
+      // Fall through to the non-2xx abort below.
+    } else {
+      char location[DOWNLOAD_BUFFLINE_SIZE];
+      if (findLocationHeader(headerData, location, sizeof(location))) {
+        resolveRedirectUrl(location, redirectUrl, sizeof(redirectUrl));
+        DPRINTF("HTTP %d redirect to: %s\n", httpStatus, redirectUrl);
+        redirectPending = true;
+        free(headerData);
+        return ERR_ABRT;  // Abort the body; poll follows the redirect
+      }
+      DPRINTF("HTTP %d without usable Location header\n", httpStatus);
+      // Fall through to the non-2xx abort below.
+    }
+  }
+
   // Only 2xx responses carry the requested content. Abort anything else
   // before the body is delivered, so an error page is never written to
   // the destination file. Returning non-OK makes lwIP close the
@@ -224,6 +298,15 @@ static void httpClientResultCompleteFn(void *arg, httpc_result_t httpcResult,
           httpcResult, rxContentLen, srvRes, err);
   req->complete = true;
 
+  // A pending redirect is not a failure: the transfer was aborted on
+  // purpose to follow the Location target. Drop the (empty) destination
+  // file; download_poll re-issues the request.
+  if (redirectPending) {
+    cleanupFailedDownloadFile();
+    downloadStatus = DOWNLOAD_STATUS_IN_PROGRESS;
+    return;
+  }
+
   // Belt and braces: even if the headers callback did not run (or missed
   // the status), a non-2xx server response is a failure.
   bool statusOk = (srvRes >= 200 && srvRes < 300);
@@ -258,6 +341,14 @@ download_err_t download_start() {
   // Reset the failure latches for this attempt
   lastHttpStatus = 0;
   httpStatusFailed = false;
+
+  // D-03: the destination filename stays the one the user requested
+  // (derived from the original URL), no matter where redirects lead.
+  if (redirectHops > 0 && savedFilename[0] != '\0') {
+    snprintf(fileUrl.filename, sizeof(fileUrl.filename), "%s", savedFilename);
+  } else {
+    snprintf(savedFilename, sizeof(savedFilename), "%s", fileUrl.filename);
+  }
 
   // Concatane in filename the folder and filename
   char filename[DOWNLOAD_BUFFLINE_SIZE] = {0};
@@ -333,6 +424,20 @@ download_poll_t download_poll() {
   if (downloadStatus == DOWNLOAD_STATUS_FAILED) {
     return DOWNLOAD_POLL_ERROR;
   }
+  if (redirectPending) {
+    // Follow the redirect from the main-loop context: the previous
+    // connection is fully closed once request.complete is set.
+    redirectPending = false;
+    redirectHops++;
+    DPRINTF("Following redirect %d/%d\n", redirectHops,
+            DOWNLOAD_MAX_REDIRECT_HOPS);
+    download_setUrl(redirectUrl);
+    if (download_start() != DOWNLOAD_OK) {
+      downloadStatus = DOWNLOAD_STATUS_FAILED;
+      return DOWNLOAD_POLL_ERROR;
+    }
+    return DOWNLOAD_POLL_CONTINUE;
+  }
   downloadStatus = DOWNLOAD_STATUS_COMPLETED;
   return DOWNLOAD_POLL_COMPLETED;
 }
@@ -361,7 +466,16 @@ download_err_t download_finish() {
 
 download_status_t download_getStatus() { return downloadStatus; }
 
-void download_setStatus(download_status_t status) { downloadStatus = status; }
+void download_setStatus(download_status_t status) {
+  if (status == DOWNLOAD_STATUS_REQUESTED) {
+    // A new user-initiated download starts a fresh redirect chain
+    redirectHops = 0;
+    redirectPending = false;
+    downloadErrorOverride = NULL;
+    savedFilename[0] = '\0';
+  }
+  downloadStatus = status;
+}
 
 // Add setter and getter for download URL and destination folder
 void download_setUrl(const char *u) {
@@ -384,6 +498,9 @@ const download_url_components_t *download_getUrlComponents() {
 
 const char *download_getErrorString() {
   static char httpErrMsg[32];
+  if (downloadErrorOverride != NULL) {
+    return downloadErrorOverride;
+  }
   if (httpStatusFailed && lastHttpStatus != 0) {
     snprintf(httpErrMsg, sizeof(httpErrMsg), "HTTP error %d", lastHttpStatus);
     return httpErrMsg;
