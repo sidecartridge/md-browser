@@ -228,10 +228,10 @@ static err_t httpClientHeaderCheckSizeFn(__unused httpc_state_t *connection,
                                          __unused void *arg, struct pbuf *hdr,
                                          u16_t hdrLen,
                                          __unused u32_t contentLen) {
-  downloadStatus = DOWNLOAD_STATUS_FAILED;
   char *headerData = malloc(hdrLen + 1);
 
   if (headerData == NULL) {
+    downloadStatus = DOWNLOAD_STATUS_FAILED;
     return ERR_MEM;  // Memory allocation failed
   }
 
