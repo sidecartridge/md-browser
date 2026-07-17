@@ -213,8 +213,6 @@ static err_t httpClientHeaderCheckSizeFn(__unused httpc_state_t *connection,
                                          u16_t hdrLen,
                                          __unused u32_t contentLen) {
   downloadStatus = DOWNLOAD_STATUS_FAILED;
-  const char *contentLengthLabel = "Content-Length:";
-  u16_t offset = 0;
   char *headerData = malloc(hdrLen + 1);
 
   if (headerData == NULL) {
@@ -270,21 +268,6 @@ static err_t httpClientHeaderCheckSizeFn(__unused httpc_state_t *connection,
     return ERR_ABRT;
   }
 
-  // Find the Content-Length header
-  char *contentLengthStart = strstr(headerData, contentLengthLabel);
-  if (contentLengthStart != NULL) {
-    contentLengthStart +=
-        strlen(contentLengthLabel);  // Move past "Content-Length:"
-
-    // Skip leading spaces
-    while (*contentLengthStart == ' ') {
-      contentLengthStart++;
-    }
-
-    // Convert the Content-Length value to an integer
-    size_t contentLength = strtoul(contentLengthStart, NULL, DEC_BASE);
-  }
-
   free(headerData);  // Free allocated memory
   downloadStatus = DOWNLOAD_STATUS_IN_PROGRESS;
   return ERR_OK;  // Header check passed
@@ -335,8 +318,24 @@ download_err_t download_start() {
   // Get the components of a url
   if (parseUrl(url, &components, &fileUrl) != 0) {
     DPRINTF("Error parsing URL\n");
+    downloadStatus = DOWNLOAD_STATUS_FAILED;
     return DOWNLOAD_CANNOTPARSEURL_ERROR;
   }
+
+#if FMANAGER_DOWNLOAD_HTTPS == 1
+  // EPIC-03 plugs runtime scheme selection here: choose the TLS config
+  // for https:// URLs and plain TCP for http:// ones.
+#else
+  // This build downloads over plain HTTP only. Fail clearly instead of
+  // silently fetching an https:// target over port 80 (either a direct
+  // URL or a cross-scheme redirect Location).
+  if (strcasecmp(components.protocol, "http") != 0) {
+    DPRINTF("Unsupported URL scheme: %s\n", components.protocol);
+    downloadErrorOverride = "HTTPS not supported by this firmware build";
+    downloadStatus = DOWNLOAD_STATUS_FAILED;
+    return DOWNLOAD_CANNOTSTARTDOWNLOAD_ERROR;
+  }
+#endif
 
   // Reset the failure latches for this attempt
   lastHttpStatus = 0;
@@ -380,6 +379,7 @@ download_err_t download_start() {
 
   if (res != FR_OK) {
     DPRINTF("Error opening file %s: %i\n", filename, res);
+    downloadStatus = DOWNLOAD_STATUS_FAILED;
     return DOWNLOAD_CANNOTOPENFILE_ERROR;
   }
 
@@ -405,6 +405,7 @@ download_err_t download_start() {
     if (res != FR_OK) {
       DPRINTF("Error closing file %s: %i\n", filename, res);
     }
+    downloadStatus = DOWNLOAD_STATUS_FAILED;
     return DOWNLOAD_CANNOTSTARTDOWNLOAD_ERROR;
   }
   return DOWNLOAD_OK;
