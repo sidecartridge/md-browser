@@ -130,6 +130,9 @@ add_subdirectory(u8g2)
 # Add qrcodegen library
 add_subdirectory(qrcodegen)
 
+# Add miniz library (ZIP extraction)
+add_subdirectory(miniz)
+
 # Add HTTP client library
 add_subdirectory(httpc)
 add_dependencies(httpc generate_rp_fsdata)
@@ -166,6 +169,7 @@ target_sources(${PROJECT_NAME} PRIVATE
         select.c
         floppy.c
         stfs.c
+        unzip.c
         usb_descriptors.c
         usb_mass.c
         tusb_config.h
@@ -203,6 +207,7 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
     pico_multicore           # Multicore support
     pico_stdlib              # Core functionality
     httpc                    # HTTP client
+    miniz                    # ZIP extraction library
     qrcodegen                # QR code generation library
     settings                 # Custom settings library
     tinyusb_device           # USB mount
