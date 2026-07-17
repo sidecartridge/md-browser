@@ -1,5 +1,8 @@
 #!/bin/bash
 
+# Fail the whole build if any step fails
+set -euo pipefail
+
 # Down to main path
 cd ..
 

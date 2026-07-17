@@ -1,12 +1,15 @@
 #!/bin/bash
 
+# Fail the whole build if any step fails
+set -euo pipefail
+
 # Ensure an argument is provided
-if [ -z "$1" ]; then
+if [ -z "${1:-}" ]; then
     echo "Usage: $0 <working_folder> all|release"
     exit 1
 fi
 
-if [ -z "$2" ]; then
+if [ -z "${2:-}" ]; then
     echo "Usage: $0 <working_folder> all|release"
     exit 1
 fi
@@ -42,11 +45,6 @@ fi
 
 # Resize the file to 64Kbytes
 ST_WORKING_FOLDER=$working_folder stcmd truncate -s $targetsize $filename
-
-if [ $? -ne 0 ]; then
-    echo "Failed to resize the file."
-    exit 3
-fi
 
 echo "File has been resized."
 
