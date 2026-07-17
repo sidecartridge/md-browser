@@ -14,11 +14,15 @@
 #define MBEDTLS_SSL_OUT_CONTENT_LEN 4096
 
 #define MBEDTLS_ALLOW_PRIVATE_ACCESS
-// RP2040 builds generally don't have a usable time-of-day implementation; avoid
-// enabling mbedTLS time features that require clock_gettime()/time().
-// (TLS auth is configured elsewhere; if you enable certificate validation,
-// revisit this and provide a proper time source.)
-// #define MBEDTLS_HAVE_TIME
+// MBEDTLS_HAVE_TIME is required to compile the SDK's altcp_tls_mbedtls.c
+// (mbedtls_ssl_session.start only exists with it). Millisecond time comes
+// from mbedtls_ms_time.c (time since boot). There is still NO wall-clock
+// time source: MBEDTLS_HAVE_TIME_DATE stays off, so certificate validity
+// periods cannot be checked (constraint C-02).
+#define MBEDTLS_HAVE_TIME
+#define MBEDTLS_PLATFORM_C
+// The app provides mbedtls_ms_time() (mbedtls_ms_time.c, ms since boot)
+#define MBEDTLS_PLATFORM_MS_TIME_ALT
 
 // Symmetric ciphers
 #define MBEDTLS_CIPHER_MODE_CBC       // Cipher block chaining

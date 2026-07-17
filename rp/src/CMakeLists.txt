@@ -148,6 +148,7 @@ target_sources(${PROJECT_NAME} PRIVATE
         gconfig.c
         hw_config.c
         mbedtls_config.h
+        mbedtls_ms_time.c
         mngr.c
         mngr_httpd.c
         network.c
@@ -309,8 +310,9 @@ add_definitions(-DDISPLAY_ATARIST)
 # We don't modify the flash in Core 1
 add_definitions(-DPICO_FLASH_ASSUME_CORE0_SAFE=1)
 
-# Select HTTPS or HTTP downloads
-add_definitions(-DFMANAGER_DOWNLOAD_HTTPS=0)
+# Compile TLS support into the download client. The scheme is selected at
+# runtime per URL: https:// negotiates TLS, http:// stays plain.
+add_definitions(-DFMANAGER_DOWNLOAD_HTTPS=1)
 
 # Remove unused data
 target_link_options(${PROJECT_NAME} PRIVATE
