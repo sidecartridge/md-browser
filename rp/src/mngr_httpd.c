@@ -415,6 +415,15 @@ static const char *json_download_status_response(void) {
   download_status_t status = download_getStatus();
   const char *error_message = "";
 
+  // COMPLETED means the network transfer ended, but download_finish()
+  // (file close, which commits the FatFs directory entry, plus the
+  // Content-Disposition rename) has not run yet in the main loop. Keep
+  // reporting in_progress so the UI only refreshes its listing once the
+  // file is fully on the card (status goes idle after finish).
+  if (status == DOWNLOAD_STATUS_COMPLETED) {
+    status = DOWNLOAD_STATUS_IN_PROGRESS;
+  }
+
   if (status == DOWNLOAD_STATUS_FAILED) {
     error_message = download_getErrorString();
     if (!error_message || error_message[0] == '\0' ||
