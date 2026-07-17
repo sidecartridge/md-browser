@@ -2485,9 +2485,13 @@ cleanup:
 // CGI: download chunk
 static const char *cgi_download_chunk(int iIndex, int iNumParams,
                                       char *pcParam[], char *pcValue[]) {
+  // CGI handlers run synchronously to completion in the single-threaded
+  // lwIP poll context (same as the shared json_buff), so these fixed-size
+  // per-chunk buffers are file-static: no malloc/free churn per chunk over
+  // the whole download (hundreds of cycles on a large file).
+  static unsigned char rawbuf[DOWNLOAD_CHUNK_SIZE];
+  static unsigned char b64buf[MAX_JSON_PAYLOAD_SIZE];
   const char *token = NULL, *chunkStr = NULL;
-  unsigned char *rawbuf = NULL;
-  unsigned char *b64buf = NULL;
   for (int i = 0; i < iNumParams; i++) {
     if (strcmp(pcParam[i], "token") == 0) token = pcValue[i];
     if (strcmp(pcParam[i], "chunk") == 0) chunkStr = pcValue[i];
@@ -2498,33 +2502,31 @@ static const char *cgi_download_chunk(int iIndex, int iNumParams,
     return "/json.shtml";
   }
   int chunk = atoi(chunkStr);
-  DWORD offset = (DWORD)chunk * DOWNLOAD_CHUNK_SIZE;
-  f_lseek(&ctx->file, offset);
-  rawbuf = malloc(DOWNLOAD_CHUNK_SIZE);
-  b64buf = malloc(MAX_JSON_PAYLOAD_SIZE);
-  if (!rawbuf || !b64buf) {
-    strcpy(json_buff, "{\"error\":\"out of memory\"}");
-    goto cleanup;
+  if (chunk < 0) {
+    strcpy(json_buff, "{\"error\":\"invalid chunk index\"}");
+    return "/json.shtml";
+  }
+  DWORD offset = (DWORD)((uint32_t)chunk * DOWNLOAD_CHUNK_SIZE);
+  if (f_lseek(&ctx->file, offset) != FR_OK) {
+    strcpy(json_buff, "{\"error\":\"seek failed\"}");
+    return "/json.shtml";
   }
   UINT readBytes = 0;
   FRESULT res = f_read(&ctx->file, rawbuf, DOWNLOAD_CHUNK_SIZE, &readBytes);
   if (res != FR_OK) {
     strcpy(json_buff, "{\"error\":\"read failed\"}");
-    goto cleanup;
+    return "/json.shtml";
   }
   size_t olen = 0;
   if (mbedtls_base64_encode(b64buf, MAX_JSON_PAYLOAD_SIZE, &olen, rawbuf,
                             readBytes) != 0) {
     strcpy(json_buff, "{\"error\":\"base64 encode failed\"}");
-    goto cleanup;
+    return "/json.shtml";
   }
   // JSON response with base64 data
   snprintf(json_buff, sizeof(json_buff),
            "{\"status\":\"chunk\",\"length\":%u,\"data\":\"%.*s\"}",
            (unsigned)readBytes, (int)olen, b64buf);
-cleanup:
-  free(b64buf);
-  free(rawbuf);
   return "/json.shtml";
 }
 
