@@ -8,6 +8,7 @@
 
 #include "download.h"
 
+#include <ctype.h>
 #include <strings.h>
 
 // Download
@@ -25,7 +26,7 @@ static const char *downloadErrorOverride = NULL;  // Specific error message
 static int redirectHops = 0;          // Redirects followed for this download
 static bool redirectPending = false;  // A Location target awaits re-issue
 static char redirectUrl[DOWNLOAD_BUFFLINE_SIZE] = {0};
-static char savedFilename[DOWNLOAD_FILENAME_SIZE] = {0};
+static char dispositionName[DOWNLOAD_FILENAME_SIZE] = {0};
 
 // Close and remove the destination file after a failed transfer so no
 // partial or bogus content (error pages, redirect stubs) is left behind.
@@ -36,14 +37,16 @@ static void cleanupFailedDownloadFile(void) {
   }
 }
 
-// Find a "Location:" header (case-insensitive, at line start) in the raw
+// Find a header (case-insensitive name match at line start) in the raw
 // response headers and copy its value into out. Returns false if absent,
 // empty or too long.
-static bool findLocationHeader(const char *headers, char *out, size_t outLen) {
+static bool findHeaderValue(const char *headers, const char *name, char *out,
+                            size_t outLen) {
+  size_t nameLen = strlen(name);
   const char *line = headers;
   while (line != NULL && *line != '\0') {
-    if (strncasecmp(line, "Location:", 9) == 0) {
-      const char *value = line + 9;
+    if (strncasecmp(line, name, nameLen) == 0) {
+      const char *value = line + nameLen;
       while (*value == ' ' || *value == '\t') {
         value++;
       }
@@ -59,6 +62,47 @@ static bool findLocationHeader(const char *headers, char *out, size_t outLen) {
     if (line != NULL) {
       line += 2;
     }
+  }
+  return false;
+}
+
+// Extract a usable filename from a Content-Disposition value
+// ('attachment; filename="GAME.ST"'), sanitized for FatFs. Returns false
+// when no plain filename= parameter is present (RFC 5987 filename*= is
+// not supported).
+static bool parseDispositionFilename(const char *value, char *out,
+                                     size_t outLen) {
+  const char *param = value;
+  while ((param = strstr(param, "ilename=")) != NULL) {
+    // Case-insensitive match of "filename=" that is not "filename*="
+    if ((param > value) && (tolower((unsigned char)param[-1]) == 'f')) {
+      const char *name = param + 8;
+      char quote = (*name == '"') ? '"' : '\0';
+      if (quote) {
+        name++;
+      }
+      size_t len = quote ? strcspn(name, "\"") : strcspn(name, "; \t");
+      if (len == 0 || len >= outLen) {
+        return false;
+      }
+      memcpy(out, name, len);
+      out[len] = '\0';
+      // Drop any path component and neutralize FAT-illegal characters
+      const char *base = strrchr(out, '/');
+      if (base == NULL) {
+        base = strrchr(out, '\\');
+      }
+      if (base != NULL) {
+        memmove(out, base + 1, strlen(base + 1) + 1);
+      }
+      for (char *c = out; *c != '\0'; c++) {
+        if (strchr("\\/:*?\"<>|", *c) != NULL) {
+          *c = '_';
+        }
+      }
+      return out[0] != '\0';
+    }
+    param++;
   }
   return false;
 }
@@ -157,7 +201,11 @@ static int parseUrl(const char *url, download_url_components_t *components,
     // Copy the filename into file->filename.
     strncpy(file->filename, filenameStart, sizeof(file->filename) - 1);
     file->filename[sizeof(file->filename) - 1] = '\0';
-  } else {
+    // Query strings and fragments are not part of the filename (and '?'
+    // is not a legal FAT character anyway)
+    file->filename[strcspn(file->filename, "?#")] = '\0';
+  }
+  if (file->filename[0] == '\0') {
     // If no filename is found, you might decide to use a default name.
     strncpy(file->filename, "default.bin", sizeof(file->filename) - 1);
     file->filename[sizeof(file->filename) - 1] = '\0';
@@ -260,7 +308,8 @@ static err_t httpClientHeaderCheckSizeFn(__unused httpc_state_t *connection,
       // Fall through to the non-2xx abort below.
     } else {
       char location[DOWNLOAD_BUFFLINE_SIZE];
-      if (findLocationHeader(headerData, location, sizeof(location))) {
+      if (findHeaderValue(headerData, "Location:", location,
+                          sizeof(location))) {
         resolveRedirectUrl(location, redirectUrl, sizeof(redirectUrl));
         DPRINTF("HTTP %d redirect to: %s\n", httpStatus, redirectUrl);
         redirectPending = true;
@@ -282,6 +331,17 @@ static err_t httpClientHeaderCheckSizeFn(__unused httpc_state_t *connection,
     httpStatusFailed = true;
     downloadStatus = DOWNLOAD_STATUS_FAILED;
     return ERR_ABRT;
+  }
+
+  // The server may name the file explicitly (RFC 6266); it wins over the
+  // URL-derived name. Applied by a rename in download_finish.
+  char disposition[DOWNLOAD_BUFFLINE_SIZE];
+  if (findHeaderValue(headerData, "Content-Disposition:", disposition,
+                      sizeof(disposition))) {
+    if (parseDispositionFilename(disposition, dispositionName,
+                                 sizeof(dispositionName))) {
+      DPRINTF("Content-Disposition filename: %s\n", dispositionName);
+    }
   }
 
   free(headerData);  // Free allocated memory
@@ -353,17 +413,13 @@ download_err_t download_start() {
   }
 #endif
 
-  // Reset the failure latches for this attempt
+  // Reset the failure latches for this attempt. The filename is derived
+  // from the URL of this hop, so after redirects it reflects the final
+  // target (browser behavior, D-03); Content-Disposition can still
+  // override it at finish.
   lastHttpStatus = 0;
   httpStatusFailed = false;
-
-  // D-03: the destination filename stays the one the user requested
-  // (derived from the original URL), no matter where redirects lead.
-  if (redirectHops > 0 && savedFilename[0] != '\0') {
-    snprintf(fileUrl.filename, sizeof(fileUrl.filename), "%s", savedFilename);
-  } else {
-    snprintf(savedFilename, sizeof(savedFilename), "%s", fileUrl.filename);
-  }
+  dispositionName[0] = '\0';
 
   // Concatane in filename the folder and filename
   char filename[DOWNLOAD_BUFFLINE_SIZE] = {0};
@@ -478,6 +534,21 @@ download_err_t download_finish() {
     DPRINTF("Error downloading: %i\n", downloadStatus);
     return DOWNLOAD_FORCEDABORT_ERROR;
   }
+
+  // Apply the server-provided filename (Content-Disposition), if any
+  if (dispositionName[0] != '\0' &&
+      strcmp(dispositionName, fileUrl.filename) != 0) {
+    char newPath[DOWNLOAD_BUFFLINE_SIZE];
+    snprintf(newPath, sizeof(newPath), "%s/%s", dst_folder, dispositionName);
+    f_unlink(newPath);  // Overwrite semantics, same as the direct path
+    res = f_rename(filepath, newPath);
+    if (res == FR_OK) {
+      DPRINTF("Renamed to Content-Disposition name: %s\n", newPath);
+      snprintf(filepath, sizeof(filepath), "%s", newPath);
+    } else {
+      DPRINTF("Rename to %s failed: %i (keeping URL name)\n", newPath, res);
+    }
+  }
   DPRINTF("File downloaded\n");
 
   return DOWNLOAD_OK;
@@ -491,7 +562,6 @@ void download_setStatus(download_status_t status) {
     redirectHops = 0;
     redirectPending = false;
     downloadErrorOverride = NULL;
-    savedFilename[0] = '\0';
   }
   downloadStatus = status;
 }
