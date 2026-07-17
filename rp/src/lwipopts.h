@@ -37,17 +37,19 @@
 // deadlocked (hardware-observed: TLS downloads timed out with zero bytes
 // delivered). The pool must cover a full TCP window of held ciphertext
 // plus decryption output and concurrent httpd traffic.
-#define PBUF_POOL_SIZE 24
+#define PBUF_POOL_SIZE 28
 #define LWIP_ARP 1
 #define LWIP_ETHERNET 1
 #define LWIP_ICMP 0
 #define LWIP_RAW 0
 #define TCP_MSS 1460
-// TLS peers send records up to 16KB and altcp_tls only acks the record's
-// bytes once the record is complete, so the TCP window must fit a whole
-// record or the sender stalls mid-record forever. 12*MSS = 17520 > 16KB
-// record + overhead.
-#define TCP_WND (12 * TCP_MSS)
+// TLS peers send records up to 16KB and altcp_tls only acks a record's
+// bytes once the record is complete, so the receive window must exceed a
+// whole record PLUS the adjacent records' overhead and lwIP's window
+// update thresholds - with 12*MSS the sender stalled 335 bytes short of
+// completing a 16KB record (hardware-traced zero-window probes). 20*MSS
+// leaves ~12KB of margin over the worst-case record.
+#define TCP_WND (20 * TCP_MSS)
 #define TCP_SND_BUF (8 * TCP_MSS)
 #define TCP_SND_QUEUELEN ((4 * (TCP_SND_BUF) + (TCP_MSS - 1)) / (TCP_MSS))
 #define LWIP_NETIF_STATUS_CALLBACK 1
