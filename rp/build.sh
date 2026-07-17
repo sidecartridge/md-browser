@@ -65,14 +65,14 @@ export BOARD_TYPE=${1:-pico_w}
 export PICO_BOARD=$BOARD_TYPE
 echo "Board type: $BOARD_TYPE"
 
-# Set the release or debug build type
+# Set the release or debug build type (normalized to lowercase once, here)
 # If nothing passed as second argument, use release
-export BUILD_TYPE=${2:-release}
+export BUILD_TYPE=$(echo "${2:-release}" | tr '[:upper:]' '[:lower:]')
 echo "Build type: $BUILD_TYPE"
 
 # If the build type is release, set DEBUG_MODE environment variable to 0
 # Otherwise set it to 1
-if [ "$(echo "$BUILD_TYPE" | tr '[:upper:]' '[:lower:]')" = "release" ]; then
+if [ "$BUILD_TYPE" = "release" ]; then
     export DEBUG_MODE=0
 else
     export DEBUG_MODE=1
@@ -91,7 +91,7 @@ echo "Building the project"
 cd build
 #cmake ../src -DCMAKE_BUILD_TYPE=$BUILD_TYPE
 cmake ../src -DCMAKE_BUILD_TYPE=Debug
-make -j4 
+make -j"$(nproc 2>/dev/null || sysctl -n hw.ncpu)"
 
 # Copy the built firmware to the /dist folder
 cd ..

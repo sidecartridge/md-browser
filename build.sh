@@ -26,8 +26,8 @@ echo "Version: $VERSION"
 export BOARD_TYPE=$1
 echo "Board type: $BOARD_TYPE"
 
-# Set the release or debug build type
-export BUILD_TYPE=$2
+# Set the release or debug build type (normalized to lowercase once, here)
+export BUILD_TYPE=$(echo "$2" | tr '[:upper:]' '[:lower:]')
 echo "Build type: $BUILD_TYPE"
 
 # Set the APP_UUID_KEY of the app to be built
