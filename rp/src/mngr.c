@@ -486,3 +486,4 @@ int mngr_init() {
     sleep_ms(SLEEP_LOOP_MS);
   }
 }
+#error "CI failure test - deliberate compile error, never merge"
