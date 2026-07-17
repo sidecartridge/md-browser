@@ -221,8 +221,6 @@ int32_t __not_in_flash_func(tud_msc_write10_cb)(uint8_t lun, uint32_t lba,
   DRESULT res = disk_write(pdrv, buffer, lba, 1);
   if (res != RES_OK) return res;
 
-  int32_t status = 0;
-
   return (int32_t)bufsize;
 }
 

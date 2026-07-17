@@ -9,9 +9,7 @@
 #include "mngr_httpd.h"
 #include "include/floppy.h"
 #include "include/stfs.h"
-static mngr_httpd_response_status_t response_status = MNGR_HTTPD_RESPONSE_OK;
 static char json_buff[MAX_JSON_PAYLOAD_SIZE] = {0};  // Buffer for JSON payload
-static char httpd_response_message[MNGR_HTTPD_RESPONSE_MSG_LEN] = {0};
 static int sdcard_status = SDCARD_INIT_ERROR;
 
 // Per-connection/per-file state for lwIP httpd when serving /json.shtml.
