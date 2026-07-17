@@ -31,13 +31,25 @@
 #define MEMP_NUM_TCP_PCB 10
 #define MEMP_NUM_TCP_SEG 32
 #define MEMP_NUM_ARP_QUEUE 10
-#define PBUF_POOL_SIZE 4
+// altcp_tls holds incoming encrypted pbufs in its rx chain until they are
+// decrypted, and decryption itself allocates a PBUF_POOL pbuf. With a
+// 4-entry pool the held ciphertext consumed the whole pool and decryption
+// deadlocked (hardware-observed: TLS downloads timed out with zero bytes
+// delivered). The pool must cover a full TCP window of held ciphertext
+// plus decryption output and concurrent httpd traffic.
+#define PBUF_POOL_SIZE 28
 #define LWIP_ARP 1
 #define LWIP_ETHERNET 1
 #define LWIP_ICMP 0
 #define LWIP_RAW 0
 #define TCP_MSS 1460
-#define TCP_WND (4 * TCP_MSS)
+// TLS peers send records up to 16KB and altcp_tls only acks a record's
+// bytes once the record is complete, so the receive window must exceed a
+// whole record PLUS the adjacent records' overhead and lwIP's window
+// update thresholds - with 12*MSS the sender stalled 335 bytes short of
+// completing a 16KB record (hardware-traced zero-window probes). 20*MSS
+// leaves ~12KB of margin over the worst-case record.
+#define TCP_WND (20 * TCP_MSS)
 #define TCP_SND_BUF (8 * TCP_MSS)
 #define TCP_SND_QUEUELEN ((4 * (TCP_SND_BUF) + (TCP_MSS - 1)) / (TCP_MSS))
 #define LWIP_NETIF_STATUS_CALLBACK 1
@@ -157,6 +169,10 @@
 #define MEMP_NUM_ALTCP_PCB 10
 #define LWIP_ALTCP_TLS 1
 #define LWIP_ALTCP_TLS_MBEDTLS 1
+// D-01 phase A: HTTPS is encrypted but NOT authenticated — no CA bundle
+// and no peer verification, so it does not protect against an active
+// MITM. Phase B (CA bundle for sidecartridge.com + VERIFY_REQUIRED)
+// additionally needs a wall-clock time source for validity checks (C-02).
 #define ALTCP_MBEDTLS_AUTHMODE MBEDTLS_SSL_VERIFY_NONE
 // #define ALTCP_MBEDTLS_DEBUG  LWIP_DBG_ON
 // #define ALTCP_MBEDTLS_LIB_DEBUG LWIP_DBG_ON

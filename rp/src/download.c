@@ -399,8 +399,15 @@ download_err_t download_start() {
   }
 
 #if FMANAGER_DOWNLOAD_HTTPS == 1
-  // EPIC-03 plugs runtime scheme selection here: choose the TLS config
-  // for https:// URLs and plain TCP for http:// ones.
+  // Only http and https are supported; the TLS decision itself is made
+  // at request setup below.
+  if (strcasecmp(components.protocol, "http") != 0 &&
+      strcasecmp(components.protocol, "https") != 0) {
+    DPRINTF("Unsupported URL scheme: %s\n", components.protocol);
+    downloadErrorOverride = "Unsupported URL scheme";
+    downloadStatus = DOWNLOAD_STATUS_FAILED;
+    return DOWNLOAD_CANNOTSTARTDOWNLOAD_ERROR;
+  }
 #else
   // This build downloads over plain HTTP only. Fail clearly instead of
   // silently fetching an https:// target over port 80 (either a direct
@@ -467,8 +474,27 @@ download_err_t download_start() {
   request.result_fn = httpClientResultCompleteFn;
   DPRINTF("Downloading: %s\n", request.url);
 #if FMANAGER_DOWNLOAD_HTTPS == 1
-  request.tls_config = altcp_tls_create_config_client(NULL, 0);  // https
-  DPRINTF("Download with HTTPS\n");
+  // Runtime scheme selection: https negotiates TLS, http stays plain.
+  // The client TLS config holds no per-connection state, so it is
+  // created once and shared by every https download (never freed).
+  if (strcasecmp(components.protocol, "https") == 0) {
+    static struct altcp_tls_config *tlsConfig = NULL;
+    if (tlsConfig == NULL) {
+      tlsConfig = altcp_tls_create_config_client(NULL, 0);
+    }
+    if (tlsConfig == NULL) {
+      DPRINTF("Cannot create the TLS client configuration\n");
+      downloadErrorOverride = "Cannot initialize HTTPS";
+      downloadStatus = DOWNLOAD_STATUS_FAILED;
+      cleanupFailedDownloadFile();
+      return DOWNLOAD_CANNOTSTARTDOWNLOAD_ERROR;
+    }
+    request.tls_config = tlsConfig;
+    DPRINTF("Download with HTTPS\n");
+  } else {
+    request.tls_config = NULL;
+    DPRINTF("Download with HTTP\n");
+  }
 #else
   DPRINTF("Download with HTTP\n");
 #endif
@@ -525,10 +551,6 @@ download_err_t download_finish() {
     return DOWNLOAD_CANNOTCLOSEFILE_ERROR;
   }
   DPRINTF("Downloaded.\n");
-
-#if FMANAGER_DOWNLOAD_HTTPS == 1
-  altcp_tls_free_config(request.tls_config);
-#endif
 
   if (downloadStatus != DOWNLOAD_STATUS_COMPLETED) {
     DPRINTF("Error downloading: %i\n", downloadStatus);

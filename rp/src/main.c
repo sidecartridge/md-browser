@@ -8,6 +8,7 @@
 
 #include "aconfig.h"
 #include "constants.h"
+#include "crash.h"
 #include "debug.h"
 #include "gconfig.h"
 #include "mngr.h"
@@ -56,6 +57,23 @@ int main() {
   // You should modify this to show the information you need
   DPRINTF("\n\nApp. %s (%s). %s mode.\n\n", RELEASE_VERSION, RELEASE_DATE,
           _DEBUG ? "DEBUG" : "RELEASE");
+
+  // The fatfs-sdk hard fault handler captures crashes into noinit RAM and
+  // resets the device. Print whatever the previous run left behind, so a
+  // crash is diagnosable from the next boot's serial output.
+  crash_handler_init();
+  const crash_info_t *crashInfo = crash_handler_get_info();
+  if (crashInfo != NULL) {
+    char crashBuf[256];
+    int next = 0;
+    do {
+      crashBuf[0] = '\0';
+      next = dump_crash_info(crashInfo, next, crashBuf, sizeof(crashBuf));
+      if (crashBuf[0] != '\0') {
+        DPRINTF("PREVIOUS RUN: %s\n", crashBuf);
+      }
+    } while (next != 0);
+  }
 
   // Show information about the frequency and voltage
   int currentClockFrequencyKhz = RP2040_CLOCK_FREQ_KHZ;

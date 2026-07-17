@@ -295,12 +295,18 @@ SECTIONS
 
 
 
-    /* stack limit is poorly named, but historically is maximum heap ptr */
-    __StackLimit = ORIGIN(RAM) + LENGTH(RAM) + LENGTH(ROM_IN_RAM);
+    /* Core 0 stack lives at the top of main RAM: the 4KB SCRATCH_Y bank
+       is too small for the mbedTLS handshake (stack overflow trampled the
+       core 1 stack in SCRATCH_X). Core 1 keeps its SCRATCH_X stack. */
+    __Core0StackSize = 16K;
     __StackOneTop = ORIGIN(SCRATCH_X) + LENGTH(SCRATCH_X);
-    __StackTop = ORIGIN(SCRATCH_Y) + LENGTH(SCRATCH_Y);
+    __StackTop = ORIGIN(RAM) + LENGTH(RAM);
     __StackOneBottom = __StackOneTop - SIZEOF(.stack1_dummy);
-    __StackBottom = __StackTop - SIZEOF(.stack_dummy);
+    __StackBottom = __StackTop - __Core0StackSize;
+    /* stack limit is poorly named, but historically is maximum heap ptr.
+       Capping it at the stack bottom also guarantees the heap can never
+       grow past the RAM region into the ROM_IN_RAM cartridge window. */
+    __StackLimit = __StackBottom;
     PROVIDE(__stack = __StackTop);
 
     /* Check if data + heap + stack exceeds RAM limit */

@@ -100,6 +100,10 @@ int http_client_request_async(async_context_t *context, HTTPC_REQUEST_T *req) {
       req->tls_allocator.arg = req;
     }
     req->settings.altcp_allocator = &req->tls_allocator;
+  } else {
+    // A reused request struct may carry the allocator from a previous
+    // https request; a plain-http request must not inherit it.
+    req->settings.altcp_allocator = NULL;
   }
 #endif
 #endif
