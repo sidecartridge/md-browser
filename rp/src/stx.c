@@ -204,3 +204,148 @@ const char *stx_err_str(stx_err_t err) {
       return "unknown error";
   }
 }
+
+// --------------------------------------------------------------------------
+// Background STX -> ST conversion job
+// --------------------------------------------------------------------------
+
+static stx_job_info_t job = {.status = STX_JOB_IDLE};
+static FIL jobOut;
+
+// Replace the source file's extension with ".st" in the destination folder.
+static void build_dest_path(const char *folder, const char *stx_path,
+                            char *out, size_t outSize) {
+  const char *base = strrchr(stx_path, '/');
+  base = base ? base + 1 : stx_path;
+  char name[STX_PATH_MAX];
+  snprintf(name, sizeof(name), "%s", base);
+  char *dot = strrchr(name, '.');
+  if (dot != NULL) *dot = '\0';
+  const char *sep = (folder && folder[0] && folder[strlen(folder) - 1] == '/')
+                        ? ""
+                        : "/";
+  snprintf(out, outSize, "%s%s%s.st", folder ? folder : "/", sep, name);
+}
+
+static void job_fail(stx_err_t err) {
+  f_close(&jobOut);
+  if (job.dest[0]) f_unlink(job.dest);
+  stx_close();
+  job.status = STX_JOB_FAILED;
+  job.last_error = err;
+}
+
+bool stx_job_start(const char *stx_path, const char *dest_folder) {
+  if (job.status == STX_JOB_CONVERTING) return false;
+  memset(&job, 0, sizeof(job));
+  snprintf(job.src, sizeof(job.src), "%s", stx_path ? stx_path : "");
+
+  stx_err_t rc = stx_open(job.src);
+  if (rc != STX_OK) {
+    job.status = STX_JOB_FAILED;
+    job.last_error = rc;
+    return false;
+  }
+  if (stx_get_geometry(&job.geom) != STX_OK || job.geom.sectors == 0 ||
+      job.geom.cylinders == 0 || job.geom.sides == 0) {
+    stx_close();
+    job.status = STX_JOB_FAILED;
+    job.last_error = STX_ERR_FORMAT;
+    return false;
+  }
+
+  build_dest_path(dest_folder, job.src, job.dest, sizeof(job.dest));
+  f_unlink(job.dest);  // overwrite
+  if (f_open(&jobOut, job.dest, FA_WRITE | FA_CREATE_ALWAYS) != FR_OK) {
+    stx_close();
+    job.dest[0] = '\0';
+    job.status = STX_JOB_FAILED;
+    job.last_error = STX_ERR_OPEN;
+    return false;
+  }
+
+  job.tracks_total = (int)job.geom.cylinders * (int)job.geom.sides;
+  job.tracks_done = 0;
+  job.status = STX_JOB_CONVERTING;
+  DPRINTF("stx: converting %s -> %s (%ux%ux%u)\n", job.src, job.dest,
+          job.geom.cylinders, job.geom.sides, job.geom.sectors);
+  return true;
+}
+
+void stx_job_poll(void) {
+  if (job.status != STX_JOB_CONVERTING) return;
+  if (job.cancel_requested) {
+    f_close(&jobOut);
+    if (job.dest[0]) f_unlink(job.dest);  // partial image is useless
+    stx_close();
+    job.status = STX_JOB_CANCELLED;
+    return;
+  }
+  if (job.tracks_done >= job.tracks_total) {
+    if (f_close(&jobOut) != FR_OK) {
+      job_fail(STX_ERR_READ);
+      return;
+    }
+    stx_close();
+    job.status = STX_JOB_COMPLETED;
+    return;
+  }
+
+  // .ST order is cylinder-major, head-minor.
+  int idx = job.tracks_done;
+  uint8_t cyl = (uint8_t)(idx / job.geom.sides);
+  uint8_t side = (uint8_t)(idx % job.geom.sides);
+  bool trackIncomplete = false;
+  uint8_t buf[STX_SECTOR_SIZE];
+  for (uint8_t s = 1; s <= job.geom.sectors; s++) {
+    stx_sector_result_t r;
+    if (stx_read_sector(cyl, side, s, buf, &r) != STX_OK) {
+      job_fail(STX_ERR_READ);
+      return;
+    }
+    UINT bw = 0;
+    if (f_write(&jobOut, buf, STX_SECTOR_SIZE, &bw) != FR_OK ||
+        bw != STX_SECTOR_SIZE) {
+      job_fail(STX_ERR_READ);  // out of space / write error
+      return;
+    }
+    if (r == STX_SECTOR_STANDARD) {
+      job.sectors_standard++;
+    } else if (r == STX_SECTOR_MISSING) {
+      job.sectors_missing++;
+      trackIncomplete = true;
+    } else {
+      job.sectors_nonstandard++;
+      trackIncomplete = true;
+    }
+  }
+  if (trackIncomplete) job.incomplete_tracks++;
+  job.tracks_done++;
+}
+
+void stx_job_cancel(void) {
+  if (job.status == STX_JOB_CONVERTING) job.cancel_requested = true;
+}
+
+bool stx_job_is_active(void) { return job.status == STX_JOB_CONVERTING; }
+
+void stx_job_get_info(stx_job_info_t *out) {
+  if (out != NULL) *out = job;
+}
+
+const char *stx_job_status_str(stx_job_status_t status) {
+  switch (status) {
+    case STX_JOB_IDLE:
+      return "idle";
+    case STX_JOB_CONVERTING:
+      return "converting";
+    case STX_JOB_COMPLETED:
+      return "completed";
+    case STX_JOB_FAILED:
+      return "failed";
+    case STX_JOB_CANCELLED:
+      return "cancelled";
+    default:
+      return "unknown";
+  }
+}
