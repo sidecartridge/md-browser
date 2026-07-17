@@ -129,8 +129,9 @@ void sdcard_getInfo(FATFS *fsPtr, uint32_t *totalSizeMb,
     return;  // Error handling: Set values to zero if getfree fails
   }
 
-  // Calculate total sectors in the SD card
-  uint64_t totalSectors = (fsPtr->n_fatent - 2) * fsPtr->csize;
+  // Calculate total sectors in the SD card (widen before multiplying so
+  // large cards do not overflow the 32-bit intermediate)
+  uint64_t totalSectors = (uint64_t)(fsPtr->n_fatent - 2) * fsPtr->csize;
 
   // Convert total sectors to bytes and then to megabytes
   *totalSizeMb = (totalSectors * NUM_BYTES_PER_SECTOR) / SDCARD_MEGABYTE;
