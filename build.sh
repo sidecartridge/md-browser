@@ -1,10 +1,13 @@
 #!/bin/bash
 
+# Fail the whole build if any step fails
+set -euo pipefail
+
 # Get the absolute path of the current script
-SCRIPT_DIR=$(dirname "$(realpath "$0")") 
+SCRIPT_DIR=$(dirname "$(realpath "$0")")
 
 # Ensure all required arguments are provided
-if [ -z "$1" ] || [ -z "$2" ] || [ -z "$3" ]; then
+if [ -z "${1:-}" ] || [ -z "${2:-}" ] || [ -z "${3:-}" ]; then
     echo "Usage: $0 <board_type> <build_type> <app_uuid_key>"
     echo "Example: $0 pico|pico_w debug|release 123e4567-e89b-12d3-a456-426614174000"
     exit 1
@@ -13,7 +16,7 @@ fi
 # Copy the version.txt to each project
 echo "Copy version.txt to each project"
 cp version.txt rp/
-cp version.txt target/
+cp version.txt target/atarist/
 
 # Display the version information
 export VERSION=$(cat version.txt)
@@ -23,8 +26,8 @@ echo "Version: $VERSION"
 export BOARD_TYPE=$1
 echo "Board type: $BOARD_TYPE"
 
-# Set the release or debug build type
-export BUILD_TYPE=$2
+# Set the release or debug build type (normalized to lowercase once, here)
+export BUILD_TYPE=$(echo "$2" | tr '[:upper:]' '[:lower:]')
 echo "Build type: $BUILD_TYPE"
 
 # Set the APP_UUID_KEY of the app to be built
@@ -95,6 +98,3 @@ mv dist/$APP_UUID_KEY.uf2 dist/$APP_UUID_KEY-$VERSION.uf2
 echo "Content of the $APP_UUID_KEY.json file:"
 mv dist/app.json dist/$APP_UUID_KEY.json
 cat dist/$APP_UUID_KEY.json
-
-# Done
-exit 0

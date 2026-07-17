@@ -1,0 +1,23 @@
+{
+  "buildType": {
+    "default": "debug",
+    "choices": {
+      "debug": {
+        "short": "Debug",
+        "long": "DEBUG_MODE=1: _DEBUG compiled in, UART stdio enabled (verbose serial output)",
+        "buildType": "Debug",
+        "env": {
+          "DEBUG_MODE": "1"
+        }
+      },
+      "release": {
+        "short": "Release",
+        "long": "DEBUG_MODE=0: no debug output, UART stdio off. CMAKE_BUILD_TYPE stays Debug on purpose - rp/build.sh ships exactly this configuration",
+        "buildType": "Debug",
+        "env": {
+          "DEBUG_MODE": "0"
+        }
+      }
+    }
+  }
+}

@@ -91,7 +91,7 @@ endif()
 # WARNING: I use a modified version of the makefsdata script to add text/css headers, not supported in the original tool
 if (NOT EXISTS ${MAKE_FS_DATA_SCRIPT})
         file(DOWNLOAD
-                https://github.com/sidecartridge/lwip/blob/c476c83fd7fda8befd4fb3f99bac99cb2f31e9fd/src/apps/http/makefsdata/makefsdata
+                https://raw.githubusercontent.com/sidecartridge/lwip/c476c83fd7fda8befd4fb3f99bac99cb2f31e9fd/src/apps/http/makefsdata/makefsdata
                 ${MAKE_FS_DATA_SCRIPT}
                 )
 endif()
