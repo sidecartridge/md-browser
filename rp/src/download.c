@@ -68,16 +68,25 @@ static bool findLocationHeader(const char *headers, char *out, size_t outLen) {
 // rebuilt from the current protocol/host/URI.
 static void resolveRedirectUrl(const char *location, char *out,
                                size_t outLen) {
+  // Host part with the explicit port re-appended when one was given
+  char hostPort[DOWNLOAD_HOSTNAME_SIZE + 8];
+  if (components.port != 0) {
+    snprintf(hostPort, sizeof(hostPort), "%s:%u", components.host,
+             components.port);
+  } else {
+    snprintf(hostPort, sizeof(hostPort), "%s", components.host);
+  }
+
   if (strstr(location, "://") != NULL) {
     snprintf(out, outLen, "%s", location);
   } else if (location[0] == '/') {
-    snprintf(out, outLen, "%s://%s%s", components.protocol, components.host,
+    snprintf(out, outLen, "%s://%s%s", components.protocol, hostPort,
              location);
   } else {
     const char *lastSlash = strrchr(components.uri, '/');
     int baseLen = lastSlash ? (int)(lastSlash - components.uri) + 1 : 0;
-    snprintf(out, outLen, "%s://%s%.*s%s", components.protocol,
-             components.host, baseLen, components.uri, location);
+    snprintf(out, outLen, "%s://%s%.*s%s", components.protocol, hostPort,
+             baseLen, components.uri, location);
   }
 }
 
@@ -130,6 +139,13 @@ static int parseUrl(const char *url, download_url_components_t *components,
     // No URI; host is the rest of the URL.
     strncpy(components->host, hostStart, sizeof(components->host) - 1);
     components->host[sizeof(components->host) - 1] = '\0';
+  }
+
+  // Split an explicit port off the host ("host:8000"), 0 = default
+  char *portSep = strchr(components->host, ':');
+  if (portSep != NULL) {
+    components->port = (uint16_t)atoi(portSep + 1);
+    *portSep = '\0';
   }
 
   // Extract the filename from the URI.
@@ -387,7 +403,9 @@ download_err_t download_start() {
 
   request.url = components.uri;
   request.hostname = components.host;
-  DPRINTF("HOST: %s. URI: %s\n", components.host, components.uri);
+  request.port = components.port;  // 0 lets httpc pick the default
+  DPRINTF("HOST: %s. PORT: %u. URI: %s\n", components.host, components.port,
+          components.uri);
   request.headers_fn = httpClientHeaderCheckSizeFn;
   request.recv_fn = httpClientReceiveFileFn;
   request.result_fn = httpClientResultCompleteFn;

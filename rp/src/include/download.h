@@ -65,6 +65,7 @@ typedef struct {
   char protocol[DOWNLOAD_PROTOCOL_SIZE];
   char host[DOWNLOAD_HOSTNAME_SIZE];
   char uri[DOWNLOAD_BUFFLINE_SIZE];
+  uint16_t port;  // Explicit port from the URL, or 0 for the default
 } download_url_components_t;
 
 typedef struct {
