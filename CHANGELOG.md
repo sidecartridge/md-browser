@@ -1,5 +1,14 @@
 # Changelog
 
+## v2.1.0 (in development)
+
+Development cycle in progress. Planned: HTTP redirect support for downloads, HTTPS downloads, build/CI hardening, and performance/robustness fixes across the file-transfer paths.
+
+### Changes
+- Started the v2.1.0 development cycle.
+
+---
+
 ## v2.0.0 (2026-03-26) - Major release
 
 This release turns md-browser into a much more capable disk manager, with full Atari ST image workflows, a redesigned Floppy DB experience, and a stronger runtime for the RP2040.
