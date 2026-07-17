@@ -986,7 +986,13 @@ extern "C" {
 enum
 {
     /* Note: These enums can be reduced as needed to save memory or stack space - they are pretty conservative. */
-    MZ_ZIP_MAX_IO_BUF_SIZE = 64 * 1024,
+    /* md-browser LOCAL MODIFICATION: 64K -> 4K. The RP2040 has only ~53KB of
+       heap shared with lwIP/httpd; the default 64KB read buffer alone (plus
+       the required 32KB inflate dict) panics the allocator. 4KB streams the
+       compressed input in small chunks, keeping extraction's peak heap (~36KB,
+       dict + read buf) in line with the working TLS-download path. Re-apply if
+       miniz is ever re-vendored. */
+    MZ_ZIP_MAX_IO_BUF_SIZE = 4 * 1024,
     MZ_ZIP_MAX_ARCHIVE_FILENAME_SIZE = 512,
     MZ_ZIP_MAX_ARCHIVE_FILE_COMMENT_SIZE = 512
 };

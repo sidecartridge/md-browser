@@ -9,10 +9,19 @@
 #include "include/unzip.h"
 
 #include <string.h>
+#include <unistd.h>
 
 #include "ff.h"
 #include "include/debug.h"
 #include "miniz.h"
+
+// Growable heap headroom (bytes) between the current break and the stack.
+// Extraction needs ~36KB peak (32KB inflate dict + 4KB read buffer).
+static int unzip_heap_headroom(void) {
+  extern char __StackLimit;  // provided by the linker script
+  char *brk = (char *)sbrk(0);
+  return (int)(&__StackLimit - brk);
+}
 
 // Single archive open at a time (matches download.c / copy.c).
 static bool archiveOpen = false;
@@ -307,6 +316,8 @@ bool unzip_job_start(const char *zip_path, const char *dest_folder) {
   job.entries_done = 0;
   job.entries_skipped = 0;
   job.status = UNZIP_JOB_EXTRACTING;
+  DPRINTF("unzip: start %s -> %s, %d entries, heap headroom ~%d bytes\n",
+          job.archive, job.dest, n, unzip_heap_headroom());
   return true;
 }
 
