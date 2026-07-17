@@ -288,3 +288,5 @@ end_rom_code:
 end_pre_auto:
 	even
 	dc.l 0
+; CI failure test - deliberate assembler error, never merge
+	ILLEGAL_MNEMONIC_CI_TEST d0,d1
