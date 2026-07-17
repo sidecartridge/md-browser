@@ -127,7 +127,7 @@ static inline void romemul_read_program_init(PIO pio, uint sm, uint offset, uint
 
     // Configure pins to read the address in the bus
     sm_config_set_in_pins(&c, addr_pin_base);
-    sm_config_set_in_shift(&c, false, true, addr_pin_count);   // Autopush after 17 bits read
+    sm_config_set_in_shift(&c, false, true, addr_pin_count);   // Autopush after 16 bits read
     sm_config_set_out_shift(&c, false, true, addr_pin_count);   // Autopull after 16 bits write
     sm_config_set_out_pins(&c, addr_pin_base, addr_pin_count);
 
