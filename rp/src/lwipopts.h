@@ -157,6 +157,10 @@
 #define MEMP_NUM_ALTCP_PCB 10
 #define LWIP_ALTCP_TLS 1
 #define LWIP_ALTCP_TLS_MBEDTLS 1
+// D-01 phase A: HTTPS is encrypted but NOT authenticated — no CA bundle
+// and no peer verification, so it does not protect against an active
+// MITM. Phase B (CA bundle for sidecartridge.com + VERIFY_REQUIRED)
+// additionally needs a wall-clock time source for validity checks (C-02).
 #define ALTCP_MBEDTLS_AUTHMODE MBEDTLS_SSL_VERIFY_NONE
 // #define ALTCP_MBEDTLS_DEBUG  LWIP_DBG_ON
 // #define ALTCP_MBEDTLS_LIB_DEBUG LWIP_DBG_ON
