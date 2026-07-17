@@ -271,3 +271,119 @@ const char *unzip_err_str(unzip_err_t err) {
       return "unknown error";
   }
 }
+
+// --------------------------------------------------------------------------
+// Background extraction job
+// --------------------------------------------------------------------------
+
+static unzip_job_info_t job = {.status = UNZIP_JOB_IDLE};
+
+static void job_finish(unzip_job_status_t status, unzip_err_t err) {
+  unzip_close();
+  job.status = status;
+  job.last_error = err;
+}
+
+bool unzip_job_start(const char *zip_path, const char *dest_folder) {
+  if (job.status == UNZIP_JOB_EXTRACTING) {
+    return false;  // one job at a time
+  }
+  memset(&job, 0, sizeof(job));
+  snprintf(job.archive, sizeof(job.archive), "%s", zip_path ? zip_path : "");
+  snprintf(job.dest, sizeof(job.dest), "%s", dest_folder ? dest_folder : "/");
+
+  unzip_err_t rc = unzip_open(job.archive);
+  if (rc != UNZIP_OK) {
+    job.status = UNZIP_JOB_FAILED;
+    job.last_error = rc;
+    return false;
+  }
+  int n = unzip_num_entries();
+  if (n < 0) {
+    job_finish(UNZIP_JOB_FAILED, UNZIP_ERR_FORMAT);
+    return false;
+  }
+  job.entries_total = n;
+  job.entries_done = 0;
+  job.entries_skipped = 0;
+  job.status = UNZIP_JOB_EXTRACTING;
+  return true;
+}
+
+void unzip_job_poll(void) {
+  if (job.status != UNZIP_JOB_EXTRACTING) {
+    return;
+  }
+  if (job.cancel_requested) {
+    job_finish(UNZIP_JOB_CANCELLED, UNZIP_OK);
+    return;
+  }
+  if (job.entries_done >= job.entries_total) {
+    job_finish(UNZIP_JOB_COMPLETED, UNZIP_OK);
+    return;
+  }
+
+  int idx = job.entries_done;
+  unzip_entry_t info;
+  unzip_err_t rc = unzip_entry_info(idx, &info);
+  if (rc == UNZIP_OK) {
+    snprintf(job.current_name, sizeof(job.current_name), "%s", info.name);
+    if (!info.supported) {
+      // Skip encrypted / unsupported-method entries rather than fail the
+      // whole archive.
+      job.entries_skipped++;
+    } else {
+      rc = unzip_extract_entry(idx, job.dest);
+    }
+  }
+
+  if (rc != UNZIP_OK && rc != UNZIP_ERR_UNSUPPORTED) {
+    job_finish(UNZIP_JOB_FAILED, rc);
+    return;
+  }
+
+  job.entries_done++;
+  if (job.entries_done >= job.entries_total) {
+    job_finish(UNZIP_JOB_COMPLETED, UNZIP_OK);
+  }
+}
+
+void unzip_job_cancel(void) {
+  if (job.status == UNZIP_JOB_EXTRACTING) {
+    job.cancel_requested = true;
+  }
+}
+
+bool unzip_job_is_active(void) {
+  return job.status == UNZIP_JOB_EXTRACTING;
+}
+
+void unzip_job_reset(void) {
+  if (job.status != UNZIP_JOB_EXTRACTING) {
+    memset(&job, 0, sizeof(job));
+    job.status = UNZIP_JOB_IDLE;
+  }
+}
+
+void unzip_job_get_info(unzip_job_info_t *out) {
+  if (out != NULL) {
+    *out = job;
+  }
+}
+
+const char *unzip_job_status_str(unzip_job_status_t status) {
+  switch (status) {
+    case UNZIP_JOB_IDLE:
+      return "idle";
+    case UNZIP_JOB_EXTRACTING:
+      return "extracting";
+    case UNZIP_JOB_COMPLETED:
+      return "completed";
+    case UNZIP_JOB_FAILED:
+      return "failed";
+    case UNZIP_JOB_CANCELLED:
+      return "cancelled";
+    default:
+      return "unknown";
+  }
+}
