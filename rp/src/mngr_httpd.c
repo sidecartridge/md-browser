@@ -9,6 +9,7 @@
 #include "mngr_httpd.h"
 #include "include/floppy.h"
 #include "include/stfs.h"
+#include "include/unzip.h"
 static char json_buff[MAX_JSON_PAYLOAD_SIZE] = {0};  // Buffer for JSON payload
 static int sdcard_status = SDCARD_INIT_ERROR;
 
@@ -1440,6 +1441,131 @@ static const char *cgi_copy_reset(int iIndex, int iNumParams, char *pcParam[],
   }
 
   return json_copy_status_response();
+}
+
+// ---- .zip extraction (EPIC-07) --------------------------------------------
+
+static const char *json_unzip_status_response(void) {
+  unzip_job_info_t info;
+  unzip_job_get_info(&info);
+
+  unsigned percent = 0;
+  if (info.status == UNZIP_JOB_COMPLETED) {
+    percent = 100;
+  } else if (info.entries_total > 0) {
+    percent = (unsigned)((info.entries_done * 100) / info.entries_total);
+  }
+
+  size_t json_len = 0;
+  json_buff[0] = '\0';
+  if (!json_appendf(json_buff, sizeof(json_buff), &json_len,
+                    "{\"status\":\"%s\",\"percent\":%u,\"entriesTotal\":%d,"
+                    "\"entriesDone\":%d,\"entriesSkipped\":%d,"
+                    "\"cancelRequested\":%s,\"errorCode\":%d,\"current\":",
+                    unzip_job_status_str(info.status), percent,
+                    info.entries_total, info.entries_done, info.entries_skipped,
+                    info.cancel_requested ? "true" : "false",
+                    (int)info.last_error) ||
+      !json_append_escaped_string(json_buff, sizeof(json_buff), &json_len,
+                                  info.current_name) ||
+      !json_appendf(json_buff, sizeof(json_buff), &json_len, ",\"error\":") ||
+      !json_append_escaped_string(
+          json_buff, sizeof(json_buff), &json_len,
+          info.status == UNZIP_JOB_FAILED ? unzip_err_str(info.last_error)
+                                          : "") ||
+      !json_appendf(json_buff, sizeof(json_buff), &json_len, "}")) {
+    strcpy(json_buff, "{\"error\":\"status too large\"}");
+  }
+  return "/json.shtml";
+}
+
+static const char *cgi_unzip_start(int iIndex, int iNumParams, char *pcParam[],
+                                   char *pcValue[]) {
+  LWIP_UNUSED_ARG(iIndex);
+
+  // Extraction, downloads and copies contend for the same heap/SD; only one
+  // SD-writing job at a time.
+  if (copy_is_active() || unzip_job_is_active()) {
+    strcpy(json_buff, "{\"error\":\"a file operation is already in progress\"}");
+    return "/json.shtml";
+  }
+  if (download_job_active()) {
+    strcpy(json_buff, "{\"error\":\"a download is in progress\"}");
+    return "/json.shtml";
+  }
+
+  const char *src_folder = NULL, *src = NULL, *dst_folder = NULL;
+  for (int i = 0; i < iNumParams; i++) {
+    if (strcmp(pcParam[i], "folder") == 0) src_folder = pcValue[i];
+    if (strcmp(pcParam[i], "name") == 0) src = pcValue[i];
+    if (strcmp(pcParam[i], "dest") == 0) dst_folder = pcValue[i];
+  }
+  if (!src_folder || !src || !dst_folder) {
+    strcpy(json_buff, "{\"error\":\"missing parameters\"}");
+    return "/json.shtml";
+  }
+
+  char decoded_src_folder[MNGR_HTTPD_MAX_FOLDER_LEN];
+  char decoded_name[MNGR_HTTPD_MAX_NAME_LEN];
+  char decoded_dst_folder[MNGR_HTTPD_MAX_FOLDER_LEN];
+  char src_folder_abs[MNGR_HTTPD_MAX_FOLDER_LEN];
+  char dst_folder_abs[MNGR_HTTPD_MAX_FOLDER_LEN];
+  char zip_path[MNGR_HTTPD_MAX_PATH_LEN];
+  if (!url_decode(src_folder, decoded_src_folder, MNGR_HTTPD_MAX_FOLDER_LEN) ||
+      !url_decode(src, decoded_name, MNGR_HTTPD_MAX_NAME_LEN) ||
+      !url_decode(dst_folder, decoded_dst_folder, MNGR_HTTPD_MAX_FOLDER_LEN) ||
+      !normalize_and_validate_path(decoded_src_folder, src_folder_abs,
+                                   MNGR_HTTPD_MAX_FOLDER_LEN) ||
+      !normalize_and_validate_path(decoded_dst_folder, dst_folder_abs,
+                                   MNGR_HTTPD_MAX_FOLDER_LEN)) {
+    strcpy(json_buff, "{\"error\":\"invalid path encoding\"}");
+    return "/json.shtml";
+  }
+  if (!join_root_folder_name(src_folder_abs, decoded_name, zip_path,
+                             MNGR_HTTPD_MAX_PATH_LEN)) {
+    strcpy(json_buff, "{\"error\":\"invalid archive path\"}");
+    return "/json.shtml";
+  }
+
+  FILINFO fno;
+  if (f_stat(zip_path, &fno) != FR_OK || (fno.fattrib & AM_DIR)) {
+    strcpy(json_buff, "{\"error\":\"archive not found\"}");
+    return "/json.shtml";
+  }
+  if (!ascii_streq_ci(dst_folder_abs, "/")) {
+    if (f_stat(dst_folder_abs, &fno) != FR_OK || !(fno.fattrib & AM_DIR)) {
+      strcpy(json_buff, "{\"error\":\"destination folder not found\"}");
+      return "/json.shtml";
+    }
+  }
+
+  if (!unzip_job_start(zip_path, dst_folder_abs)) {
+    unzip_job_info_t info;
+    unzip_job_get_info(&info);
+    snprintf(json_buff, sizeof(json_buff), "{\"error\":\"%s\"}",
+             unzip_err_str(info.last_error));
+    return "/json.shtml";
+  }
+  return json_unzip_status_response();
+}
+
+static const char *cgi_unzip_status(int iIndex, int iNumParams, char *pcParam[],
+                                    char *pcValue[]) {
+  LWIP_UNUSED_ARG(iIndex);
+  LWIP_UNUSED_ARG(iNumParams);
+  LWIP_UNUSED_ARG(pcParam);
+  LWIP_UNUSED_ARG(pcValue);
+  return json_unzip_status_response();
+}
+
+static const char *cgi_unzip_cancel(int iIndex, int iNumParams, char *pcParam[],
+                                    char *pcValue[]) {
+  LWIP_UNUSED_ARG(iIndex);
+  LWIP_UNUSED_ARG(iNumParams);
+  LWIP_UNUSED_ARG(pcParam);
+  LWIP_UNUSED_ARG(pcValue);
+  unzip_job_cancel();
+  return json_unzip_status_response();
 }
 
 // CGI: create blank Atari ST disk image
@@ -3158,6 +3284,9 @@ static const tCGI cgi_handlers[] = {
     {"/copy_status.cgi", cgi_copy_status},
     {"/copy_cancel.cgi", cgi_copy_cancel},
     {"/copy_reset.cgi", cgi_copy_reset},
+    {"/unzip_start.cgi", cgi_unzip_start},
+    {"/unzip_status.cgi", cgi_unzip_status},
+    {"/unzip_cancel.cgi", cgi_unzip_cancel},
     {"/booster.cgi", cgi_booster},
     {"/mkst.cgi", cgi_mkst},
     {"/floppy_convert.cgi", cgi_floppy_convert},

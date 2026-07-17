@@ -15,6 +15,14 @@
 #endif
 #if PICO_CYW43_ARCH_POLL
 #define MEM_LIBC_MALLOC 1
+// Back the memp pools (PBUF_POOL etc.) with the C heap instead of a static
+// .bss array. The TLS-download pbuf pool (PBUF_POOL_SIZE 28 ~= 42KB) and the
+// zip inflate dict (32KB) each need a big buffer but never run at the same
+// time (extraction is gated against downloads). As static pools they would
+// BOTH have to be permanently reserved and 192KB of RAM can't afford that
+// (heap was squeezed to ~20KB, too small for the 32KB dict). Heap-backed,
+// they time-share one large heap: whichever job is active borrows the RAM.
+#define MEMP_MEM_MALLOC 1
 #else
 // MEM_LIBC_MALLOC is incompatible with non polling versions
 // Must be undefined. Setting it to 0 can break non-poll builds.
