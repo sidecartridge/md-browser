@@ -39,10 +39,6 @@
 #define DISPLAY_MASK_TABLE_SIZE 256
 #define DISPLAY_MASK_TABLE_CHAR 8
 
-// #define DISPLAY_COMMAND_ADDRESS (ROM_IN_RAM_ADDRESS + 0x10000 + 8000) //
-// increment 64K bytes to get the second 64K block + 8000 bytes to get the 8K
-// block #define DISPLAY_HIGHRES_TRANSTABLE_ADDRESS (ROM_IN_RAM_ADDRESS +
-// 0x1000) // increment 4K bytes to create the translation table
 #define DISPLAY_HIGHRES_INVERT \
   0  // If 1, the highres display will be inverted, otherwise it will be normal
 #define DISPLAY_BYPASS_MESSAGE "Press any SHIFT key to boot from GEMDOS."

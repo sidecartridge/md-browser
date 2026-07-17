@@ -28,7 +28,7 @@ MEMORY
 
 /* This is the default flash space for the app if you don't need room to store data */
 /*    FLASH(rx) : ORIGIN = 0x10000000, LENGTH = 1152k  The first 1152kb available */
-    RAM(rwx) : ORIGIN =  0x20000000, LENGTH = 192k  /* Booster-style split: reclaim the unused upper 64KB as general RAM */
+    RAM(rwx) : ORIGIN =  0x20000000, LENGTH = 192k  /* Reclaim the upper 64KB as general RAM */
     ROM_IN_RAM (rwx) : ORIGIN = 0x20030000, LENGTH = 64K
     SCRATCH_X(rwx) : ORIGIN = 0x20040000, LENGTH = 4k
     SCRATCH_Y(rwx) : ORIGIN = 0x20041000, LENGTH = 4k
