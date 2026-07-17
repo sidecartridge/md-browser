@@ -52,6 +52,12 @@
         remoteDownloadUrl: '',
         remoteDownloadStatus: 'idle',
         remoteDownloadPollTimer: null,
+        unzipVisible: false,
+        unzipSourceName: '',
+        unzipDestFolder: '/',
+        unzipStarted: false,
+        unzipStatus: { status: 'idle', percent: 0, entriesTotal: 0, entriesDone: 0, entriesSkipped: 0, current: '', error: '' },
+        unzipPollTimer: null,
         createFolderDialogVisible: false,
         createFolderValue: '',
         createFolderInProgress: false,
@@ -750,6 +756,97 @@
             this.showBanner('Download failed to start', 'error');
             return false;
           }
+        },
+        canExtractItem(item) {
+          return !!(item && item.n && !(item.a & 0x10) && /\.zip$/i.test(item.n || ''));
+        },
+        openUnzipDialog(item) {
+          if (!this.canExtractItem(item)) return;
+          this.closeDetails();
+          this.unzipSourceName = item.n;
+          this.unzipDestFolder = this.folder || '/';
+          this.unzipStarted = false;
+          this.unzipStatus = { status: 'idle', percent: 0, entriesTotal: 0, entriesDone: 0, entriesSkipped: 0, current: '', error: '' };
+          this.unzipVisible = true;
+        },
+        clearUnzipPollTimer() {
+          if (this.unzipPollTimer) { clearTimeout(this.unzipPollTimer); this.unzipPollTimer = null; }
+        },
+        closeUnzipDialog() {
+          if (this.unzipStatus.status === 'extracting') return; // don't close mid-extract
+          this.clearUnzipPollTimer();
+          this.unzipVisible = false;
+          this.unzipStarted = false;
+        },
+        async startUnzip() {
+          if (this.unzipStarted) return;
+          const folder = this.folder || '/';
+          this.unzipStarted = true;
+          try {
+            const res = await fetch(`/unzip_start.cgi?folder=${encodeURIComponent(folder)}` +
+              `&name=${encodeURIComponent(this.unzipSourceName)}` +
+              `&dest=${encodeURIComponent(this.unzipDestFolder)}`, { cache: 'no-store' });
+            const result = res.ok ? await res.json() : { error: 'unable to start extraction' };
+            if (result.error) {
+              this.unzipStarted = false;
+              this.showBanner('Extraction failed to start: ' + result.error, 'error');
+              return;
+            }
+            this.unzipStatus = Object.assign(this.unzipStatus, result);
+            this.scheduleUnzipPoll(500);
+          } catch (_) {
+            this.unzipStarted = false;
+            this.showBanner('Extraction failed to start', 'error');
+          }
+        },
+        scheduleUnzipPoll(delay = 700) {
+          this.clearUnzipPollTimer();
+          this.unzipPollTimer = setTimeout(() => this.pollUnzip(), delay);
+        },
+        async pollUnzip() {
+          try {
+            const res = await fetch('/unzip_status.cgi', { cache: 'no-store' });
+            const result = res.ok ? await res.json() : { error: 'unable to read extraction status' };
+            if (result.error && !result.status) {
+              this.clearUnzipPollTimer();
+              this.showBanner('Extraction status failed: ' + result.error, 'error');
+              return;
+            }
+            this.unzipStatus = Object.assign(this.unzipStatus, result);
+            const s = this.unzipStatus.status;
+            if (s === 'extracting') { this.scheduleUnzipPoll(700); return; }
+            this.clearUnzipPollTimer();
+            if (s === 'completed') {
+              const skipped = Number(this.unzipStatus.entriesSkipped || 0);
+              const msg = skipped > 0
+                ? `Extraction completed (${skipped} unsupported entr${skipped === 1 ? 'y' : 'ies'} skipped).`
+                : 'Extraction completed.';
+              this.showBanner(msg, skipped > 0 ? 'warning' : 'success');
+              this.unzipVisible = false;
+              this.load(0);
+            } else if (s === 'cancelled') {
+              this.showBanner('Extraction cancelled.', 'warning');
+              this.unzipVisible = false;
+              this.load(0);
+            } else if (s === 'failed') {
+              this.showBanner('Extraction failed: ' + (this.unzipStatus.error || 'unknown error'), 'error');
+              this.unzipVisible = false;
+              this.load(0);
+            }
+          } catch (_) {
+            this.clearUnzipPollTimer();
+            this.showBanner('Extraction status failed', 'error');
+          }
+        },
+        async cancelUnzip() {
+          try { await fetch('/unzip_cancel.cgi', { cache: 'no-store' }); } catch (_) {}
+        },
+        unzipProgressText() {
+          const st = this.unzipStatus;
+          if (st.status === 'extracting') {
+            return `Extracting ${st.entriesDone}/${st.entriesTotal}: ${st.current || ''}`;
+          }
+          return '';
         },
         resetUploadUrlDialog() {
           this.uploadUrlDialogVisible = false;
@@ -1843,6 +1940,7 @@
         <button class="pure-button" x-show="!imageMode && canConvertFileItem(detailFile)" @click="openConvertDialog(detailFile)"
           x-text="convertActionLabelForName(detailFile.n)"></button>
         <button class="pure-button" x-show="!imageMode" @click="openCopyDialog(detailFile, $event)">Copy</button>
+        <button class="pure-button" x-show="!imageMode && canExtractItem(detailFile)" @click="openUnzipDialog(detailFile)">Extract</button>
         <button class="pure-button" x-show="imageMode" @click="openImageCopyDialog(detailFile, $event)">Copy to SD</button>
         <button class="pure-button" x-show="!imageMode" @click="openMoveDialog(detailFile)">Move</button>
         <button class="pure-button pure-button-primary" x-show="!imageMode || canRenameImageItem(detailFile)" @click="renameFile()">Rename</button>
@@ -1930,6 +2028,36 @@
           <p class="remote-download-status" x-text="remoteDownloadStatusMessage()"></p>
         </div>
       </div>
+    </div>
+  </div>
+  <!-- Extract .zip modal (confirm + progress) -->
+  <div x-show="unzipVisible" x-cloak class="modal">
+    <div class="modal-overlay" @click="closeUnzipDialog()"></div>
+    <div class="modal-content">
+      <h3>Extract archive</h3>
+      <p><strong>Archive:</strong> <code x-text="unzipSourceName"></code></p>
+      <p><strong>Extract into:</strong> <code x-text="unzipDestFolder || '/'"></code></p>
+      <template x-if="!unzipStarted">
+        <div>
+          <p class="copy-modal-help">The archive contents will be extracted into the current folder.</p>
+          <div class="modal-buttons">
+            <button type="button" class="pure-button" @click="closeUnzipDialog()">Cancel</button>
+            <button type="button" class="pure-button pure-button-primary" @click="startUnzip()">Extract</button>
+          </div>
+        </div>
+      </template>
+      <template x-if="unzipStarted">
+        <div>
+          <p class="remote-download-status">
+            <i class="fas fa-spinner fa-spin" x-show="unzipStatus.status === 'extracting'"></i>
+            <span x-text="unzipProgressText()"></span>
+          </p>
+          <div class="modal-buttons">
+            <button type="button" class="pure-button pure-button-warning"
+              x-show="unzipStatus.status === 'extracting'" @click="cancelUnzip()">Cancel extraction</button>
+          </div>
+        </div>
+      </template>
     </div>
   </div>
   <!-- Delete confirmation modal -->
