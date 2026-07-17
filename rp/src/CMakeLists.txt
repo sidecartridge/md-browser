@@ -145,7 +145,6 @@ target_sources(${PROJECT_NAME} PRIVATE
         display_term.c
         display_mngr.c
         download.c
-        fault.c
         gconfig.c
         hw_config.c
         mbedtls_config.h
