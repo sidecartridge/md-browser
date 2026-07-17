@@ -58,6 +58,11 @@
         unzipStarted: false,
         unzipStatus: { status: 'idle', percent: 0, entriesTotal: 0, entriesDone: 0, entriesSkipped: 0, current: '', error: '' },
         unzipPollTimer: null,
+        stxVisible: false,
+        stxSourceName: '',
+        stxStarted: false,
+        stxStatus: { status: 'idle', percent: 0, tracksTotal: 0, tracksDone: 0, sectorsStandard: 0, sectorsMissing: 0, sectorsNonstandard: 0, incompleteTracks: 0, error: '' },
+        stxPollTimer: null,
         createFolderDialogVisible: false,
         createFolderValue: '',
         createFolderInProgress: false,
@@ -845,6 +850,98 @@
           const st = this.unzipStatus;
           if (st.status === 'extracting') {
             return `Extracting ${st.entriesDone}/${st.entriesTotal}: ${st.current || ''}`;
+          }
+          return '';
+        },
+        canConvertStxItem(item) {
+          return !!(item && item.n && !(item.a & 0x10) && /\.stx$/i.test(item.n || ''));
+        },
+        openStxDialog(item) {
+          if (!this.canConvertStxItem(item)) return;
+          this.closeDetails();
+          this.stxSourceName = item.n;
+          this.stxStarted = false;
+          this.stxStatus = { status: 'idle', percent: 0, tracksTotal: 0, tracksDone: 0, sectorsStandard: 0, sectorsMissing: 0, sectorsNonstandard: 0, incompleteTracks: 0, error: '' };
+          this.stxVisible = true;
+        },
+        clearStxPollTimer() {
+          if (this.stxPollTimer) { clearTimeout(this.stxPollTimer); this.stxPollTimer = null; }
+        },
+        closeStxDialog() {
+          if (this.stxStatus.status === 'converting') return;
+          this.clearStxPollTimer();
+          this.stxVisible = false;
+          this.stxStarted = false;
+        },
+        stxTargetName() {
+          return String(this.stxSourceName || '').replace(/\.stx$/i, '.st');
+        },
+        async startStxConvert() {
+          if (this.stxStarted) return;
+          const folder = this.folder || '/';
+          this.stxStarted = true;
+          try {
+            const res = await fetch(`/stx_convert_start.cgi?folder=${encodeURIComponent(folder)}` +
+              `&name=${encodeURIComponent(this.stxSourceName)}`, { cache: 'no-store' });
+            const result = res.ok ? await res.json() : { error: 'unable to start conversion' };
+            if (result.error) {
+              this.stxStarted = false;
+              this.showBanner('Conversion failed to start: ' + result.error, 'error');
+              return;
+            }
+            this.stxStatus = Object.assign(this.stxStatus, result);
+            this.scheduleStxPoll(500);
+          } catch (_) {
+            this.stxStarted = false;
+            this.showBanner('Conversion failed to start', 'error');
+          }
+        },
+        scheduleStxPoll(delay = 700) {
+          this.clearStxPollTimer();
+          this.stxPollTimer = setTimeout(() => this.pollStxConvert(), delay);
+        },
+        async pollStxConvert() {
+          try {
+            const res = await fetch('/stx_convert_status.cgi', { cache: 'no-store' });
+            const result = res.ok ? await res.json() : { error: 'unable to read conversion status' };
+            if (result.error && !result.status) {
+              this.clearStxPollTimer();
+              this.showBanner('Conversion status failed: ' + result.error, 'error');
+              return;
+            }
+            this.stxStatus = Object.assign(this.stxStatus, result);
+            const s = this.stxStatus.status;
+            if (s === 'converting') { this.scheduleStxPoll(700); return; }
+            this.clearStxPollTimer();
+            if (s === 'completed') {
+              const inc = Number(this.stxStatus.incompleteTracks || 0);
+              const msg = inc > 0
+                ? `Converted to ${this.stxTargetName()} — ${inc} track${inc === 1 ? '' : 's'} incomplete (protection/data lost).`
+                : `Converted to ${this.stxTargetName()}.`;
+              this.showBanner(msg, inc > 0 ? 'warning' : 'success');
+              this.stxVisible = false;
+              this.load(0);
+            } else if (s === 'cancelled') {
+              this.showBanner('Conversion cancelled.', 'warning');
+              this.stxVisible = false;
+              this.load(0);
+            } else if (s === 'failed') {
+              this.showBanner('Conversion failed: ' + (this.stxStatus.error || 'unknown error'), 'error');
+              this.stxVisible = false;
+              this.load(0);
+            }
+          } catch (_) {
+            this.clearStxPollTimer();
+            this.showBanner('Conversion status failed', 'error');
+          }
+        },
+        async cancelStxConvert() {
+          try { await fetch('/stx_convert_cancel.cgi', { cache: 'no-store' }); } catch (_) {}
+        },
+        stxProgressText() {
+          const st = this.stxStatus;
+          if (st.status === 'converting') {
+            return `Converting track ${st.tracksDone}/${st.tracksTotal}`;
           }
           return '';
         },
@@ -1941,6 +2038,7 @@
           x-text="convertActionLabelForName(detailFile.n)"></button>
         <button class="pure-button" x-show="!imageMode" @click="openCopyDialog(detailFile, $event)">Copy</button>
         <button class="pure-button" x-show="!imageMode && canExtractItem(detailFile)" @click="openUnzipDialog(detailFile)">Extract</button>
+        <button class="pure-button" x-show="!imageMode && canConvertStxItem(detailFile)" @click="openStxDialog(detailFile)">Convert to .st</button>
         <button class="pure-button" x-show="imageMode" @click="openImageCopyDialog(detailFile, $event)">Copy to SD</button>
         <button class="pure-button" x-show="!imageMode" @click="openMoveDialog(detailFile)">Move</button>
         <button class="pure-button pure-button-primary" x-show="!imageMode || canRenameImageItem(detailFile)" @click="renameFile()">Rename</button>
@@ -2055,6 +2153,36 @@
           <div class="modal-buttons">
             <button type="button" class="pure-button pure-button-warning"
               x-show="unzipStatus.status === 'extracting'" @click="cancelUnzip()">Cancel extraction</button>
+          </div>
+        </div>
+      </template>
+    </div>
+  </div>
+  <!-- Convert .stx -> .st modal (confirm + progress) -->
+  <div x-show="stxVisible" x-cloak class="modal">
+    <div class="modal-overlay" @click="closeStxDialog()"></div>
+    <div class="modal-content">
+      <h3>Convert STX to ST</h3>
+      <p><strong>Source:</strong> <code x-text="stxSourceName"></code></p>
+      <p><strong>Creates:</strong> <code x-text="stxTargetName()"></code> in the current folder</p>
+      <template x-if="!stxStarted">
+        <div>
+          <p class="copy-modal-help"><strong>This conversion is lossy.</strong> It extracts the standard disk sectors into a plain <code>.st</code> image. Copy protection, weak/fuzzy bits and non-standard sectors cannot be represented and are lost — a protected disk may not boot after conversion.</p>
+          <div class="modal-buttons">
+            <button type="button" class="pure-button" @click="closeStxDialog()">Cancel</button>
+            <button type="button" class="pure-button pure-button-primary" @click="startStxConvert()">Convert</button>
+          </div>
+        </div>
+      </template>
+      <template x-if="stxStarted">
+        <div>
+          <p class="remote-download-status">
+            <i class="fas fa-spinner fa-spin" x-show="stxStatus.status === 'converting'"></i>
+            <span x-text="stxProgressText()"></span>
+          </p>
+          <div class="modal-buttons">
+            <button type="button" class="pure-button pure-button-warning"
+              x-show="stxStatus.status === 'converting'" @click="cancelStxConvert()">Cancel conversion</button>
           </div>
         </div>
       </template>
