@@ -16,6 +16,18 @@ static download_url_components_t components;
 static download_file_t fileUrl;
 static char url[DOWNLOAD_BUFFLINE_SIZE] = {0};
 static char dst_folder[DOWNLOAD_BUFFLINE_SIZE] = {0};
+static char filepath[DOWNLOAD_BUFFLINE_SIZE] = {0};
+static int lastHttpStatus = 0;       // Last HTTP status seen (0 = none yet)
+static bool httpStatusFailed = false;  // Failure caused by a non-2xx status
+
+// Close and remove the destination file after a failed transfer so no
+// partial or bogus content (error pages, redirect stubs) is left behind.
+static void cleanupFailedDownloadFile(void) {
+  f_close(&file);
+  if (filepath[0] != '\0') {
+    f_unlink(filepath);
+  }
+}
 
 // Parses a URL into its components and extracts the file name.
 static int parseUrl(const char *url, download_url_components_t *components,
@@ -161,6 +173,29 @@ static err_t httpClientHeaderCheckSizeFn(__unused httpc_state_t *connection,
   pbuf_copy_partial(hdr, headerData, hdrLen, 0);
   headerData[hdrLen] = '\0';  // Null-terminate the string
 
+  // Parse the HTTP status from the status line ("HTTP/1.x NNN ...").
+  // lwIP delivers the headers pbuf from the first byte of the response.
+  int httpStatus = 0;
+  if (strncmp(headerData, "HTTP/", 5) == 0) {
+    const char *statusStart = strchr(headerData, ' ');
+    if (statusStart != NULL) {
+      httpStatus = atoi(statusStart + 1);
+    }
+  }
+  lastHttpStatus = httpStatus;
+
+  // Only 2xx responses carry the requested content. Abort anything else
+  // before the body is delivered, so an error page is never written to
+  // the destination file. Returning non-OK makes lwIP close the
+  // connection with HTTPC_RESULT_LOCAL_ABORT.
+  if (httpStatus < 200 || httpStatus >= 300) {
+    DPRINTF("HTTP status %d: aborting transfer before body\n", httpStatus);
+    free(headerData);
+    httpStatusFailed = true;
+    downloadStatus = DOWNLOAD_STATUS_FAILED;
+    return ERR_ABRT;
+  }
+
   // Find the Content-Length header
   char *contentLengthStart = strstr(headerData, contentLengthLabel);
   if (contentLengthStart != NULL) {
@@ -185,13 +220,26 @@ static void httpClientResultCompleteFn(void *arg, httpc_result_t httpcResult,
                                        u32_t rxContentLen, u32_t srvRes,
                                        err_t err) {
   HTTPC_REQUEST_T *req = (HTTPC_REQUEST_T *)arg;
-  DPRINTF("Requet complete: result %d len %u server_response %u err %d\n",
+  DPRINTF("Request complete: result %d len %u server_response %u err %d\n",
           httpcResult, rxContentLen, srvRes, err);
   req->complete = true;
-  if (err == ERR_OK) {
+
+  // Belt and braces: even if the headers callback did not run (or missed
+  // the status), a non-2xx server response is a failure.
+  bool statusOk = (srvRes >= 200 && srvRes < 300);
+  if (!statusOk && srvRes != 0) {
+    lastHttpStatus = (int)srvRes;
+    httpStatusFailed = true;
+  }
+
+  if (err == ERR_OK && statusOk &&
+      downloadStatus != DOWNLOAD_STATUS_FAILED) {
     downloadStatus = DOWNLOAD_STATUS_COMPLETED;
   } else {
     downloadStatus = DOWNLOAD_STATUS_FAILED;
+    // Runs in the cooperative poll context (same thread as the main
+    // loop), so FatFs access is safe here.
+    cleanupFailedDownloadFile();
   }
 }
 
@@ -207,9 +255,14 @@ download_err_t download_start() {
     return DOWNLOAD_CANNOTPARSEURL_ERROR;
   }
 
+  // Reset the failure latches for this attempt
+  lastHttpStatus = 0;
+  httpStatusFailed = false;
+
   // Concatane in filename the folder and filename
   char filename[DOWNLOAD_BUFFLINE_SIZE] = {0};
   snprintf(filename, sizeof(filename), "%s/%s", dst_folder, fileUrl.filename);
+  snprintf(filepath, sizeof(filepath), "%s", filename);
 
   // Close any previously open handle
   DPRINTF("Closing any previously open file\n");
@@ -271,8 +324,14 @@ download_poll_t download_poll() {
     async_context_poll(cyw43_arch_async_context());
     async_context_wait_for_work_ms(cyw43_arch_async_context(),
                                    DOWNLOAD_POLLING_INTERVAL_MS);
-    downloadStatus = DOWNLOAD_STATUS_IN_PROGRESS;
+    // A failure latched by the callbacks must survive the polling loop.
+    if (downloadStatus != DOWNLOAD_STATUS_FAILED) {
+      downloadStatus = DOWNLOAD_STATUS_IN_PROGRESS;
+    }
     return DOWNLOAD_POLL_CONTINUE;
+  }
+  if (downloadStatus == DOWNLOAD_STATUS_FAILED) {
+    return DOWNLOAD_POLL_ERROR;
   }
   downloadStatus = DOWNLOAD_STATUS_COMPLETED;
   return DOWNLOAD_POLL_COMPLETED;
@@ -324,6 +383,11 @@ const download_url_components_t *download_getUrlComponents() {
 }
 
 const char *download_getErrorString() {
+  static char httpErrMsg[32];
+  if (httpStatusFailed && lastHttpStatus != 0) {
+    snprintf(httpErrMsg, sizeof(httpErrMsg), "HTTP error %d", lastHttpStatus);
+    return httpErrMsg;
+  }
   switch (downloadStatus) {
     case DOWNLOAD_OK:
       return "No error";
