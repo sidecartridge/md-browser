@@ -1379,6 +1379,7 @@ static const char *cgi_img_import_start(int iIndex, int iNumParams,
   }
 
   stfs_close(image_fs);
+  free(image_fs);  // stfs_close frees internals but not the struct itself
   image_fs = NULL;
 
   if (!copy_start_to_image(src_path, image_abs, image_dst_path)) {
@@ -2331,6 +2332,10 @@ static const char *cgi_upload_chunk(int iIndex, int iNumParams, char *pcParam[],
     return "/json.shtml";
   }
   int chunk = atoi(chunkStr);
+  if (chunk < 0) {
+    strcpy(json_buff, "{\"error\":\"invalid chunk index\"}");
+    return "/json.shtml";
+  }
   // URL-decode the base64 payload parameter
   size_t plen = strlen(payload) + 1;
   char *decodedPayload = malloc(plen);
@@ -2365,7 +2370,12 @@ static const char *cgi_upload_chunk(int iIndex, int iNumParams, char *pcParam[],
   }
   free(decodedPayload);
   // Seek to chunk offset using fixed chunk size
-  f_lseek(&ctx->file, (DWORD)(chunk * UPLOAD_CHUNK_SIZE));
+  if (f_lseek(&ctx->file, (DWORD)((uint32_t)chunk * UPLOAD_CHUNK_SIZE)) !=
+      FR_OK) {
+    free(buffer);
+    strcpy(json_buff, "{\"error\":\"seek failed\"}");
+    return "/json.shtml";
+  }
   if (decodedLen > 0) {
     UINT written;
     FRESULT res = f_write(&ctx->file, buffer, decodedLen, &written);

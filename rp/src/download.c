@@ -228,6 +228,7 @@ static err_t httpClientReceiveFileFn(__unused void *arg,
   if (err != ERR_OK) {
     DPRINTF("Error receiving file: %i\n", err);
     downloadStatus = DOWNLOAD_STATUS_FAILED;
+    pbuf_free(ptr);  // The recv callback owns the pbuf; free before aborting
     return ERR_VAL;  // Invalid input or error occurred
   }
 
@@ -236,6 +237,7 @@ static err_t httpClientReceiveFileFn(__unused void *arg,
   if (buffc == NULL) {
     DPRINTF("Error allocating memory\n");
     downloadStatus = DOWNLOAD_STATUS_FAILED;
+    pbuf_free(ptr);  // Free the pbuf before aborting to avoid pool starvation
     return ERR_MEM;  // Memory allocation failed
   }
 
@@ -254,6 +256,7 @@ static err_t httpClientReceiveFileFn(__unused void *arg,
   if (res != FR_OK || bytesWritten != ptr->tot_len) {
     DPRINTF("Error writing to file: %i\n", res);
     downloadStatus = DOWNLOAD_STATUS_FAILED;
+    pbuf_free(ptr);  // e.g. SD card full: free before aborting, don't leak pool
     return ERR_ABRT;  // Abort on failure
   }
 
@@ -547,7 +550,7 @@ download_err_t download_finish() {
   // Close the file
   int res = f_close(&file);
   if (res != FR_OK) {
-    DPRINTF("Error closing tmp file %s: %i\n", res);
+    DPRINTF("Error closing tmp file: %i\n", res);
     return DOWNLOAD_CANNOTCLOSEFILE_ERROR;
   }
   DPRINTF("Downloaded.\n");
