@@ -114,6 +114,14 @@ add_custom_command(
 )
 add_custom_target(generate_rp_fsdata DEPENDS ${CMAKE_CURRENT_LIST_DIR}/fsdata_srv.c)
 
+# Compile TLS support into the download client. The scheme is selected at
+# runtime per URL: https:// negotiates TLS, http:// stays plain.
+# MUST be defined before any add_subdirectory: the flag changes struct
+# layouts (httpc request, lwIP altcp fields) and every target that
+# compiles lwIP or httpc.h has to agree on it, or the linked binary mixes
+# incompatible layouts (hard fault on the first download).
+add_definitions(-DFMANAGER_DOWNLOAD_HTTPS=1)
+
 add_subdirectory(settings)
 
 # Add u8g2 library
@@ -310,9 +318,9 @@ add_definitions(-DDISPLAY_ATARIST)
 # We don't modify the flash in Core 1
 add_definitions(-DPICO_FLASH_ASSUME_CORE0_SAFE=1)
 
-# Compile TLS support into the download client. The scheme is selected at
-# runtime per URL: https:// negotiates TLS, http:// stays plain.
-add_definitions(-DFMANAGER_DOWNLOAD_HTTPS=1)
+# (FMANAGER_DOWNLOAD_HTTPS is defined near the top of this file: it must
+# exist BEFORE add_subdirectory(httpc) so every target compiles lwIP and
+# the request structs with the same layout.)
 
 # Remove unused data
 target_link_options(${PROJECT_NAME} PRIVATE
