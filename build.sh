@@ -16,7 +16,7 @@ fi
 # Copy the version.txt to each project
 echo "Copy version.txt to each project"
 cp version.txt rp/
-cp version.txt target/
+cp version.txt target/atarist/
 
 # Display the version information
 export VERSION=$(cat version.txt)

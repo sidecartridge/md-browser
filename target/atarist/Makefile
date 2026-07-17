@@ -46,6 +46,7 @@ VLINK =  vlink
 all: prepare dist
 
 .PHONY: release
+release: DEBUG_MODE = 0
 release: prepare dist
 
 .PHONY: prepare
@@ -75,5 +76,5 @@ clean:
 ## Tag this version
 .PHONY: tag
 tag:
-	git tag v$(VERSION) && git push origin v$(VERSION) && \
+	git tag $(VERSION) && git push origin $(VERSION) && \
 	echo "Tagged: $(VERSION)"

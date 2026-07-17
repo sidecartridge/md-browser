@@ -47,7 +47,7 @@ jobs:
 
     - name: Get current date
       id: build
-      run: echo "::set-output name=date::$(date -u +"%Y-%m-%d %H:%M:%S UTC")"
+      run: echo "date=$(date -u +"%Y-%m-%d %H:%M:%S UTC")" >> "$GITHUB_OUTPUT"
 
     - name: Get version from version.txt
       id: get_version
