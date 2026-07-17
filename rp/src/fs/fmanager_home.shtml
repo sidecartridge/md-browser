@@ -710,7 +710,12 @@
               return;
             }
             if (this.remoteDownloadStatus === 'idle' || this.remoteDownloadStatus === 'completed') {
+              const wasActive = this.remoteDownloadVisible;
               this.resetRemoteDownloadState();
+              if (wasActive) {
+                this.showBanner('Download completed.', 'success');
+                this.load(0);
+              }
               return;
             }
             this.scheduleRemoteDownloadPoll(1000);

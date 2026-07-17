@@ -8,6 +8,9 @@
 
 #include "download.h"
 
+#include <ctype.h>
+#include <strings.h>
+
 // Download
 static FIL file;
 static download_status_t downloadStatus = DOWNLOAD_STATUS_IDLE;
@@ -16,6 +19,120 @@ static download_url_components_t components;
 static download_file_t fileUrl;
 static char url[DOWNLOAD_BUFFLINE_SIZE] = {0};
 static char dst_folder[DOWNLOAD_BUFFLINE_SIZE] = {0};
+static char filepath[DOWNLOAD_BUFFLINE_SIZE] = {0};
+static int lastHttpStatus = 0;       // Last HTTP status seen (0 = none yet)
+static bool httpStatusFailed = false;  // Failure caused by a non-2xx status
+static const char *downloadErrorOverride = NULL;  // Specific error message
+static int redirectHops = 0;          // Redirects followed for this download
+static bool redirectPending = false;  // A Location target awaits re-issue
+static char redirectUrl[DOWNLOAD_BUFFLINE_SIZE] = {0};
+static char dispositionName[DOWNLOAD_FILENAME_SIZE] = {0};
+
+// Close and remove the destination file after a failed transfer so no
+// partial or bogus content (error pages, redirect stubs) is left behind.
+static void cleanupFailedDownloadFile(void) {
+  f_close(&file);
+  if (filepath[0] != '\0') {
+    f_unlink(filepath);
+  }
+}
+
+// Find a header (case-insensitive name match at line start) in the raw
+// response headers and copy its value into out. Returns false if absent,
+// empty or too long.
+static bool findHeaderValue(const char *headers, const char *name, char *out,
+                            size_t outLen) {
+  size_t nameLen = strlen(name);
+  const char *line = headers;
+  while (line != NULL && *line != '\0') {
+    if (strncasecmp(line, name, nameLen) == 0) {
+      const char *value = line + nameLen;
+      while (*value == ' ' || *value == '\t') {
+        value++;
+      }
+      size_t len = strcspn(value, "\r\n");
+      if (len == 0 || len >= outLen) {
+        return false;
+      }
+      memcpy(out, value, len);
+      out[len] = '\0';
+      return true;
+    }
+    line = strstr(line, "\r\n");
+    if (line != NULL) {
+      line += 2;
+    }
+  }
+  return false;
+}
+
+// Extract a usable filename from a Content-Disposition value
+// ('attachment; filename="GAME.ST"'), sanitized for FatFs. Returns false
+// when no plain filename= parameter is present (RFC 5987 filename*= is
+// not supported).
+static bool parseDispositionFilename(const char *value, char *out,
+                                     size_t outLen) {
+  const char *param = value;
+  while ((param = strstr(param, "ilename=")) != NULL) {
+    // Case-insensitive match of "filename=" that is not "filename*="
+    if ((param > value) && (tolower((unsigned char)param[-1]) == 'f')) {
+      const char *name = param + 8;
+      char quote = (*name == '"') ? '"' : '\0';
+      if (quote) {
+        name++;
+      }
+      size_t len = quote ? strcspn(name, "\"") : strcspn(name, "; \t");
+      if (len == 0 || len >= outLen) {
+        return false;
+      }
+      memcpy(out, name, len);
+      out[len] = '\0';
+      // Drop any path component and neutralize FAT-illegal characters
+      const char *base = strrchr(out, '/');
+      if (base == NULL) {
+        base = strrchr(out, '\\');
+      }
+      if (base != NULL) {
+        memmove(out, base + 1, strlen(base + 1) + 1);
+      }
+      for (char *c = out; *c != '\0'; c++) {
+        if (strchr("\\/:*?\"<>|", *c) != NULL) {
+          *c = '_';
+        }
+      }
+      return out[0] != '\0';
+    }
+    param++;
+  }
+  return false;
+}
+
+// Resolve a Location value against the request that produced it: absolute
+// URLs pass through; host-relative ("/path") and path-relative targets are
+// rebuilt from the current protocol/host/URI.
+static void resolveRedirectUrl(const char *location, char *out,
+                               size_t outLen) {
+  // Host part with the explicit port re-appended when one was given
+  char hostPort[DOWNLOAD_HOSTNAME_SIZE + 8];
+  if (components.port != 0) {
+    snprintf(hostPort, sizeof(hostPort), "%s:%u", components.host,
+             components.port);
+  } else {
+    snprintf(hostPort, sizeof(hostPort), "%s", components.host);
+  }
+
+  if (strstr(location, "://") != NULL) {
+    snprintf(out, outLen, "%s", location);
+  } else if (location[0] == '/') {
+    snprintf(out, outLen, "%s://%s%s", components.protocol, hostPort,
+             location);
+  } else {
+    const char *lastSlash = strrchr(components.uri, '/');
+    int baseLen = lastSlash ? (int)(lastSlash - components.uri) + 1 : 0;
+    snprintf(out, outLen, "%s://%s%.*s%s", components.protocol, hostPort,
+             baseLen, components.uri, location);
+  }
+}
 
 // Parses a URL into its components and extracts the file name.
 static int parseUrl(const char *url, download_url_components_t *components,
@@ -68,6 +185,13 @@ static int parseUrl(const char *url, download_url_components_t *components,
     components->host[sizeof(components->host) - 1] = '\0';
   }
 
+  // Split an explicit port off the host ("host:8000"), 0 = default
+  char *portSep = strchr(components->host, ':');
+  if (portSep != NULL) {
+    components->port = (uint16_t)atoi(portSep + 1);
+    *portSep = '\0';
+  }
+
   // Extract the filename from the URI.
   // Look for the last '/' in components->uri.
   const char *lastSlash = strrchr(components->uri, '/');
@@ -77,7 +201,11 @@ static int parseUrl(const char *url, download_url_components_t *components,
     // Copy the filename into file->filename.
     strncpy(file->filename, filenameStart, sizeof(file->filename) - 1);
     file->filename[sizeof(file->filename) - 1] = '\0';
-  } else {
+    // Query strings and fragments are not part of the filename (and '?'
+    // is not a legal FAT character anyway)
+    file->filename[strcspn(file->filename, "?#")] = '\0';
+  }
+  if (file->filename[0] == '\0') {
     // If no filename is found, you might decide to use a default name.
     strncpy(file->filename, "default.bin", sizeof(file->filename) - 1);
     file->filename[sizeof(file->filename) - 1] = '\0';
@@ -148,12 +276,10 @@ static err_t httpClientHeaderCheckSizeFn(__unused httpc_state_t *connection,
                                          __unused void *arg, struct pbuf *hdr,
                                          u16_t hdrLen,
                                          __unused u32_t contentLen) {
-  downloadStatus = DOWNLOAD_STATUS_FAILED;
-  const char *contentLengthLabel = "Content-Length:";
-  u16_t offset = 0;
   char *headerData = malloc(hdrLen + 1);
 
   if (headerData == NULL) {
+    downloadStatus = DOWNLOAD_STATUS_FAILED;
     return ERR_MEM;  // Memory allocation failed
   }
 
@@ -161,19 +287,61 @@ static err_t httpClientHeaderCheckSizeFn(__unused httpc_state_t *connection,
   pbuf_copy_partial(hdr, headerData, hdrLen, 0);
   headerData[hdrLen] = '\0';  // Null-terminate the string
 
-  // Find the Content-Length header
-  char *contentLengthStart = strstr(headerData, contentLengthLabel);
-  if (contentLengthStart != NULL) {
-    contentLengthStart +=
-        strlen(contentLengthLabel);  // Move past "Content-Length:"
-
-    // Skip leading spaces
-    while (*contentLengthStart == ' ') {
-      contentLengthStart++;
+  // Parse the HTTP status from the status line ("HTTP/1.x NNN ...").
+  // lwIP delivers the headers pbuf from the first byte of the response.
+  int httpStatus = 0;
+  if (strncmp(headerData, "HTTP/", 5) == 0) {
+    const char *statusStart = strchr(headerData, ' ');
+    if (statusStart != NULL) {
+      httpStatus = atoi(statusStart + 1);
     }
+  }
+  lastHttpStatus = httpStatus;
 
-    // Convert the Content-Length value to an integer
-    size_t contentLength = strtoul(contentLengthStart, NULL, DEC_BASE);
+  // Redirect statuses: capture the Location target and abort this
+  // transfer; download_poll re-issues the request to the new URL (D-03).
+  if (httpStatus == 301 || httpStatus == 302 || httpStatus == 303 ||
+      httpStatus == 307 || httpStatus == 308) {
+    if (redirectHops >= DOWNLOAD_MAX_REDIRECT_HOPS) {
+      DPRINTF("Redirect limit (%d) exceeded\n", DOWNLOAD_MAX_REDIRECT_HOPS);
+      downloadErrorOverride = "Too many redirects";
+      // Fall through to the non-2xx abort below.
+    } else {
+      char location[DOWNLOAD_BUFFLINE_SIZE];
+      if (findHeaderValue(headerData, "Location:", location,
+                          sizeof(location))) {
+        resolveRedirectUrl(location, redirectUrl, sizeof(redirectUrl));
+        DPRINTF("HTTP %d redirect to: %s\n", httpStatus, redirectUrl);
+        redirectPending = true;
+        free(headerData);
+        return ERR_ABRT;  // Abort the body; poll follows the redirect
+      }
+      DPRINTF("HTTP %d without usable Location header\n", httpStatus);
+      // Fall through to the non-2xx abort below.
+    }
+  }
+
+  // Only 2xx responses carry the requested content. Abort anything else
+  // before the body is delivered, so an error page is never written to
+  // the destination file. Returning non-OK makes lwIP close the
+  // connection with HTTPC_RESULT_LOCAL_ABORT.
+  if (httpStatus < 200 || httpStatus >= 300) {
+    DPRINTF("HTTP status %d: aborting transfer before body\n", httpStatus);
+    free(headerData);
+    httpStatusFailed = true;
+    downloadStatus = DOWNLOAD_STATUS_FAILED;
+    return ERR_ABRT;
+  }
+
+  // The server may name the file explicitly (RFC 6266); it wins over the
+  // URL-derived name. Applied by a rename in download_finish.
+  char disposition[DOWNLOAD_BUFFLINE_SIZE];
+  if (findHeaderValue(headerData, "Content-Disposition:", disposition,
+                      sizeof(disposition))) {
+    if (parseDispositionFilename(disposition, dispositionName,
+                                 sizeof(dispositionName))) {
+      DPRINTF("Content-Disposition filename: %s\n", dispositionName);
+    }
   }
 
   free(headerData);  // Free allocated memory
@@ -185,13 +353,35 @@ static void httpClientResultCompleteFn(void *arg, httpc_result_t httpcResult,
                                        u32_t rxContentLen, u32_t srvRes,
                                        err_t err) {
   HTTPC_REQUEST_T *req = (HTTPC_REQUEST_T *)arg;
-  DPRINTF("Requet complete: result %d len %u server_response %u err %d\n",
+  DPRINTF("Request complete: result %d len %u server_response %u err %d\n",
           httpcResult, rxContentLen, srvRes, err);
   req->complete = true;
-  if (err == ERR_OK) {
+
+  // A pending redirect is not a failure: the transfer was aborted on
+  // purpose to follow the Location target. Drop the (empty) destination
+  // file; download_poll re-issues the request.
+  if (redirectPending) {
+    cleanupFailedDownloadFile();
+    downloadStatus = DOWNLOAD_STATUS_IN_PROGRESS;
+    return;
+  }
+
+  // Belt and braces: even if the headers callback did not run (or missed
+  // the status), a non-2xx server response is a failure.
+  bool statusOk = (srvRes >= 200 && srvRes < 300);
+  if (!statusOk && srvRes != 0) {
+    lastHttpStatus = (int)srvRes;
+    httpStatusFailed = true;
+  }
+
+  if (err == ERR_OK && statusOk &&
+      downloadStatus != DOWNLOAD_STATUS_FAILED) {
     downloadStatus = DOWNLOAD_STATUS_COMPLETED;
   } else {
     downloadStatus = DOWNLOAD_STATUS_FAILED;
+    // Runs in the cooperative poll context (same thread as the main
+    // loop), so FatFs access is safe here.
+    cleanupFailedDownloadFile();
   }
 }
 
@@ -204,12 +394,37 @@ download_err_t download_start() {
   // Get the components of a url
   if (parseUrl(url, &components, &fileUrl) != 0) {
     DPRINTF("Error parsing URL\n");
+    downloadStatus = DOWNLOAD_STATUS_FAILED;
     return DOWNLOAD_CANNOTPARSEURL_ERROR;
   }
+
+#if FMANAGER_DOWNLOAD_HTTPS == 1
+  // EPIC-03 plugs runtime scheme selection here: choose the TLS config
+  // for https:// URLs and plain TCP for http:// ones.
+#else
+  // This build downloads over plain HTTP only. Fail clearly instead of
+  // silently fetching an https:// target over port 80 (either a direct
+  // URL or a cross-scheme redirect Location).
+  if (strcasecmp(components.protocol, "http") != 0) {
+    DPRINTF("Unsupported URL scheme: %s\n", components.protocol);
+    downloadErrorOverride = "HTTPS not supported by this firmware build";
+    downloadStatus = DOWNLOAD_STATUS_FAILED;
+    return DOWNLOAD_CANNOTSTARTDOWNLOAD_ERROR;
+  }
+#endif
+
+  // Reset the failure latches for this attempt. The filename is derived
+  // from the URL of this hop, so after redirects it reflects the final
+  // target (browser behavior, D-03); Content-Disposition can still
+  // override it at finish.
+  lastHttpStatus = 0;
+  httpStatusFailed = false;
+  dispositionName[0] = '\0';
 
   // Concatane in filename the folder and filename
   char filename[DOWNLOAD_BUFFLINE_SIZE] = {0};
   snprintf(filename, sizeof(filename), "%s/%s", dst_folder, fileUrl.filename);
+  snprintf(filepath, sizeof(filepath), "%s", filename);
 
   // Close any previously open handle
   DPRINTF("Closing any previously open file\n");
@@ -236,6 +451,7 @@ download_err_t download_start() {
 
   if (res != FR_OK) {
     DPRINTF("Error opening file %s: %i\n", filename, res);
+    downloadStatus = DOWNLOAD_STATUS_FAILED;
     return DOWNLOAD_CANNOTOPENFILE_ERROR;
   }
 
@@ -243,7 +459,9 @@ download_err_t download_start() {
 
   request.url = components.uri;
   request.hostname = components.host;
-  DPRINTF("HOST: %s. URI: %s\n", components.host, components.uri);
+  request.port = components.port;  // 0 lets httpc pick the default
+  DPRINTF("HOST: %s. PORT: %u. URI: %s\n", components.host, components.port,
+          components.uri);
   request.headers_fn = httpClientHeaderCheckSizeFn;
   request.recv_fn = httpClientReceiveFileFn;
   request.result_fn = httpClientResultCompleteFn;
@@ -261,6 +479,7 @@ download_err_t download_start() {
     if (res != FR_OK) {
       DPRINTF("Error closing file %s: %i\n", filename, res);
     }
+    downloadStatus = DOWNLOAD_STATUS_FAILED;
     return DOWNLOAD_CANNOTSTARTDOWNLOAD_ERROR;
   }
   return DOWNLOAD_OK;
@@ -271,7 +490,27 @@ download_poll_t download_poll() {
     async_context_poll(cyw43_arch_async_context());
     async_context_wait_for_work_ms(cyw43_arch_async_context(),
                                    DOWNLOAD_POLLING_INTERVAL_MS);
-    downloadStatus = DOWNLOAD_STATUS_IN_PROGRESS;
+    // A failure latched by the callbacks must survive the polling loop.
+    if (downloadStatus != DOWNLOAD_STATUS_FAILED) {
+      downloadStatus = DOWNLOAD_STATUS_IN_PROGRESS;
+    }
+    return DOWNLOAD_POLL_CONTINUE;
+  }
+  if (downloadStatus == DOWNLOAD_STATUS_FAILED) {
+    return DOWNLOAD_POLL_ERROR;
+  }
+  if (redirectPending) {
+    // Follow the redirect from the main-loop context: the previous
+    // connection is fully closed once request.complete is set.
+    redirectPending = false;
+    redirectHops++;
+    DPRINTF("Following redirect %d/%d\n", redirectHops,
+            DOWNLOAD_MAX_REDIRECT_HOPS);
+    download_setUrl(redirectUrl);
+    if (download_start() != DOWNLOAD_OK) {
+      downloadStatus = DOWNLOAD_STATUS_FAILED;
+      return DOWNLOAD_POLL_ERROR;
+    }
     return DOWNLOAD_POLL_CONTINUE;
   }
   downloadStatus = DOWNLOAD_STATUS_COMPLETED;
@@ -295,6 +534,21 @@ download_err_t download_finish() {
     DPRINTF("Error downloading: %i\n", downloadStatus);
     return DOWNLOAD_FORCEDABORT_ERROR;
   }
+
+  // Apply the server-provided filename (Content-Disposition), if any
+  if (dispositionName[0] != '\0' &&
+      strcmp(dispositionName, fileUrl.filename) != 0) {
+    char newPath[DOWNLOAD_BUFFLINE_SIZE];
+    snprintf(newPath, sizeof(newPath), "%s/%s", dst_folder, dispositionName);
+    f_unlink(newPath);  // Overwrite semantics, same as the direct path
+    res = f_rename(filepath, newPath);
+    if (res == FR_OK) {
+      DPRINTF("Renamed to Content-Disposition name: %s\n", newPath);
+      snprintf(filepath, sizeof(filepath), "%s", newPath);
+    } else {
+      DPRINTF("Rename to %s failed: %i (keeping URL name)\n", newPath, res);
+    }
+  }
   DPRINTF("File downloaded\n");
 
   return DOWNLOAD_OK;
@@ -302,7 +556,15 @@ download_err_t download_finish() {
 
 download_status_t download_getStatus() { return downloadStatus; }
 
-void download_setStatus(download_status_t status) { downloadStatus = status; }
+void download_setStatus(download_status_t status) {
+  if (status == DOWNLOAD_STATUS_REQUESTED) {
+    // A new user-initiated download starts a fresh redirect chain
+    redirectHops = 0;
+    redirectPending = false;
+    downloadErrorOverride = NULL;
+  }
+  downloadStatus = status;
+}
 
 // Add setter and getter for download URL and destination folder
 void download_setUrl(const char *u) {
@@ -324,6 +586,14 @@ const download_url_components_t *download_getUrlComponents() {
 }
 
 const char *download_getErrorString() {
+  static char httpErrMsg[32];
+  if (downloadErrorOverride != NULL) {
+    return downloadErrorOverride;
+  }
+  if (httpStatusFailed && lastHttpStatus != 0) {
+    snprintf(httpErrMsg, sizeof(httpErrMsg), "HTTP error %d", lastHttpStatus);
+    return httpErrMsg;
+  }
   switch (downloadStatus) {
     case DOWNLOAD_OK:
       return "No error";
