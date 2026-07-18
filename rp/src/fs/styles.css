@@ -1616,3 +1616,6 @@ th.sorted {
 .stx-verdict-yellow .stx-verdict-dot { background: #f0ad4e; }
 .stx-verdict-red { color: #c62828; }
 .stx-verdict-red .stx-verdict-dot { background: #c62828; }
+
+/* Consistent spacing for leading action-button icons (EPIC-09) */
+.pure-button > i.fas { margin-right: 0.4em; }
