@@ -305,6 +305,24 @@
         init() {
           this.load(0);
           this.pollCopyStatus(true);
+          // Paste an http/https link anywhere in the File Manager to open
+          // Upload-from-URL prefilled (STORY EPIC-09).
+          document.addEventListener('paste', (e) => this.handleGlobalPaste(e));
+        },
+        handleGlobalPaste(e) {
+          if (this.imageMode) return;  // host view only, not image-browse
+          const t = e.target;
+          if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+          // Don't hijack when a dialog or transfer is already open.
+          if (this.uploadUrlDialogVisible || this.remoteDownloadVisible ||
+              this.stxVisible || this.unzipVisible) return;
+          let text = '';
+          try { text = (e.clipboardData || window.clipboardData).getData('text') || ''; } catch (_) { return; }
+          const url = text.trim().split(/\s+/)[0];
+          if (!/^https?:\/\//i.test(url)) return;
+          e.preventDefault();
+          this.openUploadUrlDialog();
+          this.uploadUrlValue = url;
         },
         toggleSort(key) {
           if (this.sortKey === key) this.sortAsc = !this.sortAsc;
@@ -2064,18 +2082,17 @@
           <span x-text="(detailFile.a & 0x01) ? 'Writable' : 'Read-only'"></span>
         </button>
         <!-- File operations -->
-        <button class="pure-button" x-show="!imageMode && canBrowseImageItem(detailFile)" @click="openImage(detailFile)">Browse Image</button>
-        <button class="pure-button" x-show="!imageMode && canConvertFileItem(detailFile)" @click="openConvertDialog(detailFile)"
-          x-text="convertActionLabelForName(detailFile.n)"></button>
-        <button class="pure-button" x-show="!imageMode" @click="openCopyDialog(detailFile, $event)">Copy</button>
-        <button class="pure-button" x-show="!imageMode && canExtractItem(detailFile)" @click="openUnzipDialog(detailFile)">Extract</button>
-        <button class="pure-button" x-show="!imageMode && canConvertStxItem(detailFile)" @click="openStxDialog(detailFile)">Convert to .st</button>
-        <button class="pure-button" x-show="imageMode" @click="openImageCopyDialog(detailFile, $event)">Copy to SD</button>
-        <button class="pure-button" x-show="!imageMode" @click="openMoveDialog(detailFile)">Move</button>
-        <button class="pure-button pure-button-primary" x-show="!imageMode || canRenameImageItem(detailFile)" @click="renameFile()">Rename</button>
-        <button class="pure-button pure-button-success" x-show="!imageMode" @click="downloadFile()">Download</button>
-        <button class="pure-button pure-button-danger" x-show="!imageMode || canDeleteImageItem(detailFile)" @click="openDeleteDialog(detailFile, $event)">Delete</button>
-        <button class="pure-button" @click="closeDetails()">Close</button>
+        <button class="pure-button" x-show="!imageMode && canBrowseImageItem(detailFile)" @click="openImage(detailFile)"><i class="fas fa-folder-tree"></i> Browse Image</button>
+        <button class="pure-button" x-show="!imageMode && canConvertFileItem(detailFile)" @click="openConvertDialog(detailFile)"><i class="fas fa-retweet"></i> <span x-text="convertActionLabelForName(detailFile.n)"></span></button>
+        <button class="pure-button" x-show="!imageMode" @click="openCopyDialog(detailFile, $event)"><i class="fas fa-copy"></i> Copy</button>
+        <button class="pure-button" x-show="!imageMode && canExtractItem(detailFile)" @click="openUnzipDialog(detailFile)"><i class="fas fa-box-open"></i> Extract</button>
+        <button class="pure-button" x-show="!imageMode && canConvertStxItem(detailFile)" @click="openStxDialog(detailFile)"><i class="fas fa-retweet"></i> Convert to .st</button>
+        <button class="pure-button" x-show="imageMode" @click="openImageCopyDialog(detailFile, $event)"><i class="fas fa-file-export"></i> Copy to SD</button>
+        <button class="pure-button" x-show="!imageMode" @click="openMoveDialog(detailFile)"><i class="fas fa-arrow-right"></i> Move</button>
+        <button class="pure-button pure-button-primary" x-show="!imageMode || canRenameImageItem(detailFile)" @click="renameFile()"><i class="fas fa-pen-to-square"></i> Rename</button>
+        <button class="pure-button pure-button-success" x-show="!imageMode" @click="downloadFile()"><i class="fas fa-download"></i> Download</button>
+        <button class="pure-button pure-button-danger" x-show="!imageMode || canDeleteImageItem(detailFile)" @click="openDeleteDialog(detailFile, $event)"><i class="fas fa-trash"></i> Delete</button>
+        <button class="pure-button" @click="closeDetails()"><i class="fas fa-xmark"></i> Close</button>
       </div>
       <p x-show="imageMode" class="copy-modal-help"
         x-text="canModifyCurrentImage() ? 'Writable floppy image. Files and folders can be copied out to the microSD, renamed, or deleted from the image.' : 'Read-only browsing inside the floppy image. Files and folders can be copied out to the microSD.'"></p>
@@ -2539,12 +2556,12 @@
     <p>Folder: <strong x-text="folder || '/'"></strong></p>
     <div style="margin:1rem 0; display:flex; gap:0.5rem;">
       <input type="file" x-ref="fileInput" style="display:none" multiple @change="uploadFiles($event)" />
-      <button class="pure-button pure-button-primary" :disabled="imageMode" @click="$refs.fileInput.click()">Upload Files</button>
-      <button class="pure-button" :disabled="imageMode" @click="openUploadUrlDialog()">Upload from URL</button>
-      <button class="pure-button" :disabled="imageMode" @click="openCreateFolderDialog()">New Folder</button>
-      <button class="pure-button" :disabled="imageMode" @click="openCreateDiskMenu()">Blank ST Image</button>
+      <button class="pure-button pure-button-primary" :disabled="imageMode" @click="$refs.fileInput.click()"><i class="fas fa-upload"></i> Upload Files</button>
+      <button class="pure-button" :disabled="imageMode" @click="openUploadUrlDialog()"><i class="fas fa-link"></i> Upload from URL</button>
+      <button class="pure-button" :disabled="imageMode" @click="openCreateFolderDialog()"><i class="fas fa-folder-plus"></i> New Folder</button>
+      <button class="pure-button" :disabled="imageMode" @click="openCreateDiskMenu()"><i class="fas fa-floppy-disk"></i> Blank ST Image</button>
       <button class="pure-button pure-button-primary" x-show="imageMode" :disabled="!canImportIntoImage()"
-        @click="openImageImportDialog()">Import from SD</button>
+        @click="openImageImportDialog()"><i class="fas fa-file-import"></i> Import from SD</button>
     </div>
     <div x-show="imageMode" class="image-browse-strip">
       <span class="image-browse-strip-label">Inside image</span>
