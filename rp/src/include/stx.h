@@ -26,12 +26,20 @@ typedef enum {
   STX_ERR_STATE     // no image open / API misuse
 } stx_err_t;
 
-// Result of reading one logical sector.
+// Per-sector conversion risk tier (also the preflight color).
 typedef enum {
-  STX_SECTOR_STANDARD = 0,  // clean 512-byte standard sector, data valid
-  STX_SECTOR_MISSING,       // no such sector on the track (zero-filled)
-  STX_SECTOR_NONSTANDARD    // present but protected/non-standard (zero-filled)
-} stx_sector_result_t;
+  STX_TIER_LOSSLESS = 0,  // green: standard 512B sector, byte-perfect
+  STX_TIER_METADATA,      // yellow: data recovered, only protection/timing
+                          // metadata lost (bit-width, deleted-DAM, timing)
+  STX_TIER_DATALOSS       // red: real data loss (fuzzy/CRC/RNF/non-512/missing)
+} stx_tier_t;
+
+// Overall verdict = worst tier present across the whole disk.
+typedef enum {
+  STX_VERDICT_LOSSLESS = 0,   // all sectors lossless (green)
+  STX_VERDICT_ACCEPTABLE,     // some metadata loss, no data loss (yellow)
+  STX_VERDICT_CAREFUL         // at least one data-loss sector (red)
+} stx_verdict_t;
 
 typedef struct {
   uint8_t sides;         // 1 or 2
@@ -47,17 +55,51 @@ stx_err_t stx_open(const char *path);
 stx_err_t stx_get_geometry(stx_geometry_t *out);
 
 /**
- * Read the 512 bytes of logical sector (cyl, side, sector_number) into buf.
- * buf must be STX_SECTOR_SIZE bytes. On MISSING/NONSTANDARD the buffer is
- * zero-filled and the corresponding result is returned (still STX_OK rc).
+ * Read the 512 bytes of logical sector (cyl, side, sector_number) into buf
+ * (STX_SECTOR_SIZE bytes) and report its risk tier. The best-available data
+ * bytes are extracted whenever a 512-byte data block exists (lossless,
+ * metadata, and recoverable data-loss cases); only sectors with no usable
+ * 512-byte block (RNF / wrong size / missing) are zero-filled.
  */
 stx_err_t stx_read_sector(uint8_t cyl, uint8_t side, uint8_t sector_number,
-                          uint8_t *buf, stx_sector_result_t *result);
+                          uint8_t *buf, stx_tier_t *tier);
 
 /** Close the image and release the file handle. */
 void stx_close(void);
 
 const char *stx_err_str(stx_err_t err);
+
+// --------------------------------------------------------------------------
+// Preflight: scan the STX descriptors (no sector-data reads) and predict the
+// conversion outcome so the UI can warn before committing.
+// --------------------------------------------------------------------------
+
+#define STX_PREFLIGHT_EXAMPLES 6
+
+typedef struct {
+  stx_verdict_t verdict;
+  stx_geometry_t geom;
+  int total_sectors;
+  int lossless;   // green count
+  int metadata;   // yellow count
+  int dataloss;   // red count
+  int example_count;
+  struct {
+    uint8_t cyl;
+    uint8_t side;
+    uint8_t sector;
+    uint8_t tier;  // stx_tier_t of this example (metadata/dataloss only)
+  } examples[STX_PREFLIGHT_EXAMPLES];
+} stx_preflight_t;
+
+/**
+ * @brief Open @p path, classify every logical sector from the descriptors,
+ * and fill @p out with the verdict and per-tier counts. Opens and closes the
+ * image itself (does not disturb a running job). Fast: reads descriptors only.
+ */
+stx_err_t stx_preflight(const char *path, stx_preflight_t *out);
+
+const char *stx_verdict_str(stx_verdict_t v);
 
 // --------------------------------------------------------------------------
 // Background STX->ST conversion job (main-loop driven, cancellable).
@@ -81,10 +123,10 @@ typedef struct {
   stx_geometry_t geom;
   int tracks_total;
   int tracks_done;
-  int sectors_standard;
-  int sectors_missing;
-  int sectors_nonstandard;
-  int incomplete_tracks;  // tracks with >=1 missing/non-standard sector
+  int sectors_lossless;    // green
+  int sectors_metadata;    // yellow (data recovered, metadata lost)
+  int sectors_dataloss;    // red (real data loss)
+  int incomplete_tracks;   // tracks with >=1 data-loss sector
   bool cancel_requested;
   stx_err_t last_error;
 } stx_job_info_t;

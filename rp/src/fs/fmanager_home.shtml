@@ -60,8 +60,9 @@
         unzipPollTimer: null,
         stxVisible: false,
         stxSourceName: '',
-        stxStarted: false,
-        stxStatus: { status: 'idle', percent: 0, tracksTotal: 0, tracksDone: 0, sectorsStandard: 0, sectorsMissing: 0, sectorsNonstandard: 0, incompleteTracks: 0, error: '' },
+        stxPhase: 'checking',  // checking | result | converting
+        stxPreflight: { verdict: '', lossless: 0, metadata: 0, dataloss: 0, totalSectors: 0, cylinders: 0, sides: 0, sectors: 0 },
+        stxStatus: { status: 'idle', percent: 0, tracksTotal: 0, tracksDone: 0, sectorsLossless: 0, sectorsMetadata: 0, sectorsDataloss: 0, incompleteTracks: 0, error: '' },
         stxPollTimer: null,
         createFolderDialogVisible: false,
         createFolderValue: '',
@@ -856,43 +857,73 @@
         canConvertStxItem(item) {
           return !!(item && item.n && !(item.a & 0x10) && /\.stx$/i.test(item.n || ''));
         },
-        openStxDialog(item) {
+        async openStxDialog(item) {
           if (!this.canConvertStxItem(item)) return;
           this.closeDetails();
           this.stxSourceName = item.n;
-          this.stxStarted = false;
-          this.stxStatus = { status: 'idle', percent: 0, tracksTotal: 0, tracksDone: 0, sectorsStandard: 0, sectorsMissing: 0, sectorsNonstandard: 0, incompleteTracks: 0, error: '' };
+          this.stxPhase = 'checking';
+          this.stxPreflight = { verdict: '', lossless: 0, metadata: 0, dataloss: 0, totalSectors: 0, cylinders: 0, sides: 0, sectors: 0 };
+          this.stxStatus = { status: 'idle', percent: 0, tracksTotal: 0, tracksDone: 0, sectorsLossless: 0, sectorsMetadata: 0, sectorsDataloss: 0, incompleteTracks: 0, error: '' };
           this.stxVisible = true;
+          // Run the preflight first, then show the colored verdict.
+          try {
+            const folder = this.folder || '/';
+            const res = await fetch(`/stx_preflight.cgi?folder=${encodeURIComponent(folder)}` +
+              `&name=${encodeURIComponent(this.stxSourceName)}`, { cache: 'no-store' });
+            const result = res.ok ? await res.json() : { error: 'preflight failed' };
+            if (result.error) {
+              this.stxVisible = false;
+              this.showBanner('Cannot analyze: ' + result.error, 'error');
+              return;
+            }
+            this.stxPreflight = Object.assign(this.stxPreflight, result);
+            this.stxPhase = 'result';
+          } catch (_) {
+            this.stxVisible = false;
+            this.showBanner('Cannot analyze the archive', 'error');
+          }
         },
         clearStxPollTimer() {
           if (this.stxPollTimer) { clearTimeout(this.stxPollTimer); this.stxPollTimer = null; }
         },
         closeStxDialog() {
-          if (this.stxStatus.status === 'converting') return;
+          if (this.stxPhase === 'converting') return;
           this.clearStxPollTimer();
           this.stxVisible = false;
-          this.stxStarted = false;
         },
         stxTargetName() {
           return String(this.stxSourceName || '').replace(/\.stx$/i, '.st');
         },
+        stxVerdictClass() {
+          return { lossless: 'stx-verdict-green', acceptable: 'stx-verdict-yellow', careful: 'stx-verdict-red' }[this.stxPreflight.verdict] || '';
+        },
+        stxVerdictLabel() {
+          return { lossless: 'LOSSLESS', acceptable: 'ACCEPTABLE', careful: 'CAREFUL' }[this.stxPreflight.verdict] || '';
+        },
+        stxVerdictHelp() {
+          const v = this.stxPreflight.verdict;
+          if (v === 'lossless') return 'Every sector is standard — the .st will be a perfect copy.';
+          if (v === 'acceptable') return 'All sector data is recovered. Only copy-protection / timing metadata is lost (' + this.stxPreflight.metadata + ' sector(s)); a protected disk may still not boot.';
+          if (v === 'careful') return this.stxPreflight.dataloss + ' sector(s) cannot be faithfully recovered (fuzzy, CRC error, or missing). The .st will be incomplete.';
+          return '';
+        },
         async startStxConvert() {
-          if (this.stxStarted) return;
+          if (this.stxPhase === 'converting') return;
           const folder = this.folder || '/';
-          this.stxStarted = true;
+          this.stxPhase = 'converting';
           try {
             const res = await fetch(`/stx_convert_start.cgi?folder=${encodeURIComponent(folder)}` +
               `&name=${encodeURIComponent(this.stxSourceName)}`, { cache: 'no-store' });
             const result = res.ok ? await res.json() : { error: 'unable to start conversion' };
             if (result.error) {
-              this.stxStarted = false;
+              this.stxPhase = 'result';
               this.showBanner('Conversion failed to start: ' + result.error, 'error');
               return;
             }
             this.stxStatus = Object.assign(this.stxStatus, result);
             this.scheduleStxPoll(500);
           } catch (_) {
-            this.stxStarted = false;
+            this.stxPhase = 'result';
             this.showBanner('Conversion failed to start', 'error');
           }
         },
@@ -2158,23 +2189,42 @@
       </template>
     </div>
   </div>
-  <!-- Convert .stx -> .st modal (confirm + progress) -->
+  <!-- Convert .stx -> .st modal (preflight -> result -> progress) -->
   <div x-show="stxVisible" x-cloak class="modal">
     <div class="modal-overlay" @click="closeStxDialog()"></div>
     <div class="modal-content">
       <h3>Convert STX to ST</h3>
       <p><strong>Source:</strong> <code x-text="stxSourceName"></code></p>
       <p><strong>Creates:</strong> <code x-text="stxTargetName()"></code> in the current folder</p>
-      <template x-if="!stxStarted">
+      <!-- Phase 1: analyzing -->
+      <template x-if="stxPhase === 'checking'">
+        <p class="remote-download-status"><i class="fas fa-spinner fa-spin"></i> Analyzing the archive…</p>
+      </template>
+      <!-- Phase 2: preflight result + confirm -->
+      <template x-if="stxPhase === 'result'">
         <div>
-          <p class="copy-modal-help"><strong>This conversion is lossy.</strong> It extracts the standard disk sectors into a plain <code>.st</code> image. Copy protection, weak/fuzzy bits and non-standard sectors cannot be represented and are lost — a protected disk may not boot after conversion.</p>
+          <p class="stx-verdict" :class="stxVerdictClass()">
+            <span class="stx-verdict-dot"></span>
+            <span x-text="stxVerdictLabel()"></span>
+          </p>
+          <p class="copy-modal-help" x-text="stxVerdictHelp()"></p>
+          <p class="copy-modal-help">
+            Disk <span x-text="stxPreflight.cylinders"></span> tracks ×
+            <span x-text="stxPreflight.sides"></span> side(s) ×
+            <span x-text="stxPreflight.sectors"></span> sectors —
+            <span x-text="stxPreflight.lossless"></span> lossless,
+            <span x-text="stxPreflight.metadata"></span> metadata-only,
+            <span x-text="stxPreflight.dataloss"></span> with data loss.
+          </p>
           <div class="modal-buttons">
             <button type="button" class="pure-button" @click="closeStxDialog()">Cancel</button>
-            <button type="button" class="pure-button pure-button-primary" @click="startStxConvert()">Convert</button>
+            <button type="button" class="pure-button pure-button-primary" @click="startStxConvert()"
+              x-text="stxPreflight.verdict === 'careful' ? 'Convert anyway' : 'Convert'"></button>
           </div>
         </div>
       </template>
-      <template x-if="stxStarted">
+      <!-- Phase 3: converting -->
+      <template x-if="stxPhase === 'converting'">
         <div>
           <p class="remote-download-status">
             <i class="fas fa-spinner fa-spin" x-show="stxStatus.status === 'converting'"></i>

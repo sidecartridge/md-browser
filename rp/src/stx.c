@@ -30,9 +30,36 @@
 #include "ff.h"
 #include "include/debug.h"
 
-#define STX_TRK_SECT 0x01u   // trackFlags bit0: has sector descriptors
-#define STX_FDC_CLEAN 0x00u  // fdcFlags: standard sector when all bits clear
-#define STX_SIZE_512 2u      // id.size code for 512-byte sectors
+#define STX_TRK_SECT 0x01u  // trackFlags bit0: has sector descriptors
+#define STX_SIZE_512 2u     // id.size code for 512-byte sectors
+
+// fdcFlags bits (Pasti sector descriptor)
+#define STX_FDC_FUZZY 0x80u     // weak/fuzzy bits -> data loss
+#define STX_FDC_DELETED 0x20u   // deleted-data mark -> metadata (data present)
+#define STX_FDC_RNF 0x10u       // record not found -> no data block
+#define STX_FDC_CRC 0x08u       // CRC error in data -> data loss
+#define STX_FDC_BITWIDTH 0x01u  // intra-sector bit-width protection -> metadata
+
+// Classify a sector from its descriptor fields into a conversion risk tier.
+// Red (data loss): wrong size, fuzzy, CRC error, or record-not-found.
+// Yellow (metadata): 512B data present but bit-width/deleted protection or
+// non-standard timing. Green: a clean standard 512B sector.
+static stx_tier_t classify_sector(uint8_t id_size, uint16_t read_time,
+                                  uint8_t fdc_flags) {
+  if (id_size != STX_SIZE_512) return STX_TIER_DATALOSS;
+  if (fdc_flags & (STX_FDC_FUZZY | STX_FDC_RNF | STX_FDC_CRC)) {
+    return STX_TIER_DATALOSS;
+  }
+  if ((fdc_flags & (STX_FDC_BITWIDTH | STX_FDC_DELETED)) || read_time != 0) {
+    return STX_TIER_METADATA;
+  }
+  return STX_TIER_LOSSLESS;
+}
+
+// A 512-byte data block can be read when the sector is 512B and not RNF.
+static bool sector_has_data(uint8_t id_size, uint8_t fdc_flags) {
+  return id_size == STX_SIZE_512 && !(fdc_flags & STX_FDC_RNF);
+}
 
 typedef struct {
   uint32_t record_offset;  // file offset of the track record
@@ -138,47 +165,125 @@ stx_err_t stx_get_geometry(stx_geometry_t *out) {
   return STX_OK;
 }
 
+// Find the 16-byte sector descriptor for a given sector number on a
+// descriptor track. Returns true and fills sd[16] if found.
+static bool find_sector_desc(const stx_track_t *t, uint8_t sector_number,
+                             uint8_t sd[16]) {
+  uint32_t descBase = t->record_offset + 16u;
+  for (int i = 0; i < t->sector_count; i++) {
+    if (!read_at(descBase + (uint32_t)i * 16u, sd, 16)) return false;
+    if (sd[0x0A] == sector_number) return true;
+  }
+  return false;
+}
+
 stx_err_t stx_read_sector(uint8_t cyl, uint8_t side, uint8_t sector_number,
-                          uint8_t *buf, stx_sector_result_t *result) {
+                          uint8_t *buf, stx_tier_t *tier) {
   if (!imageOpen || buf == NULL) return STX_ERR_STATE;
   memset(buf, 0, STX_SECTOR_SIZE);
-  if (result) *result = STX_SECTOR_MISSING;
+  if (tier) *tier = STX_TIER_DATALOSS;  // missing == data loss
 
   const stx_track_t *t = find_track(cyl, side);
   if (t == NULL || sector_number < 1 || sector_number > t->sector_count) {
-    return STX_OK;  // MISSING, zero-filled
+    return STX_OK;  // missing, zero-filled, data loss
   }
 
   if (!(t->track_flags & STX_TRK_SECT)) {
     // Standard track: sectors 1..n, 512 bytes each, right after the header.
     uint32_t pos = t->record_offset + 16u + (uint32_t)(sector_number - 1) * 512u;
     if (!read_at(pos, buf, STX_SECTOR_SIZE)) return STX_ERR_READ;
-    if (result) *result = STX_SECTOR_STANDARD;
+    if (tier) *tier = STX_TIER_LOSSLESS;
     return STX_OK;
   }
 
-  // Track with sector descriptors: find the matching clean-standard sector.
-  uint32_t descBase = t->record_offset + 16u;
-  uint32_t dataBase = descBase + (uint32_t)t->sector_count * 16u + t->fuzzy_count;
-  for (int i = 0; i < t->sector_count; i++) {
-    uint8_t sd[16];
-    if (!read_at(descBase + (uint32_t)i * 16u, sd, 16)) return STX_ERR_READ;
-    uint8_t idNumber = sd[0x0A];
-    if (idNumber != sector_number) continue;
-    uint8_t idSize = sd[0x0B];
-    uint8_t fdcFlags = sd[0x0E];
-    if (idSize != STX_SIZE_512 || fdcFlags != STX_FDC_CLEAN) {
-      // Present but protected / wrong size / no data: non-standard.
-      if (result) *result = STX_SECTOR_NONSTANDARD;
-      return STX_OK;  // zero-filled
-    }
+  // Track with sector descriptors.
+  uint8_t sd[16];
+  if (!find_sector_desc(t, sector_number, sd)) {
+    return STX_OK;  // no descriptor for this sector: missing, data loss
+  }
+  uint8_t idSize = sd[0x0B];
+  uint16_t readTime = rd_u16(sd + 6);
+  uint8_t fdcFlags = sd[0x0E];
+  stx_tier_t tr = classify_sector(idSize, readTime, fdcFlags);
+  if (tier) *tier = tr;
+  // Extract the best-available 512 bytes whenever a data block exists (green,
+  // yellow, and recoverable red like fuzzy/CRC); otherwise leave zero-filled.
+  if (sector_has_data(idSize, fdcFlags)) {
+    uint32_t dataBase =
+        t->record_offset + 16u + (uint32_t)t->sector_count * 16u + t->fuzzy_count;
     uint32_t dataOffset = rd_u32(sd + 0);
     if (!read_at(dataBase + dataOffset, buf, STX_SECTOR_SIZE)) return STX_ERR_READ;
-    if (result) *result = STX_SECTOR_STANDARD;
-    return STX_OK;
   }
-  // Address exists in geometry but no descriptor matched: missing.
   return STX_OK;
+}
+
+// Classify one logical sector for preflight (descriptors only, no data read).
+static stx_tier_t preflight_sector(const stx_track_t *t, uint8_t sector_number) {
+  if (t == NULL || sector_number < 1 || sector_number > t->sector_count) {
+    return STX_TIER_DATALOSS;  // missing
+  }
+  if (!(t->track_flags & STX_TRK_SECT)) {
+    return STX_TIER_LOSSLESS;  // standard track: all sectors clean
+  }
+  uint8_t sd[16];
+  if (!find_sector_desc(t, sector_number, sd)) return STX_TIER_DATALOSS;
+  return classify_sector(sd[0x0B], rd_u16(sd + 6), sd[0x0E]);
+}
+
+stx_err_t stx_preflight(const char *path, stx_preflight_t *out) {
+  if (out == NULL) return STX_ERR_STATE;
+  stx_err_t rc = stx_open(path);
+  if (rc != STX_OK) return rc;
+
+  memset(out, 0, sizeof(*out));
+  if (stx_get_geometry(&out->geom) != STX_OK || out->geom.sectors == 0) {
+    stx_close();
+    return STX_ERR_FORMAT;
+  }
+
+  for (uint8_t cyl = 0; cyl < out->geom.cylinders; cyl++) {
+    for (uint8_t side = 0; side < out->geom.sides; side++) {
+      const stx_track_t *t = find_track(cyl, side);
+      for (uint8_t s = 1; s <= out->geom.sectors; s++) {
+        stx_tier_t tr = preflight_sector(t, s);
+        out->total_sectors++;
+        if (tr == STX_TIER_LOSSLESS) {
+          out->lossless++;
+        } else {
+          if (tr == STX_TIER_METADATA) {
+            out->metadata++;
+          } else {
+            out->dataloss++;
+          }
+          if (out->example_count < STX_PREFLIGHT_EXAMPLES) {
+            out->examples[out->example_count].cyl = cyl;
+            out->examples[out->example_count].side = side;
+            out->examples[out->example_count].sector = s;
+            out->examples[out->example_count].tier = (uint8_t)tr;
+            out->example_count++;
+          }
+        }
+      }
+    }
+  }
+  out->verdict = out->dataloss > 0    ? STX_VERDICT_CAREFUL
+                 : out->metadata > 0  ? STX_VERDICT_ACCEPTABLE
+                                      : STX_VERDICT_LOSSLESS;
+  stx_close();
+  return STX_OK;
+}
+
+const char *stx_verdict_str(stx_verdict_t v) {
+  switch (v) {
+    case STX_VERDICT_LOSSLESS:
+      return "lossless";
+    case STX_VERDICT_ACCEPTABLE:
+      return "acceptable";
+    case STX_VERDICT_CAREFUL:
+      return "careful";
+    default:
+      return "unknown";
+  }
 }
 
 void stx_close(void) {
@@ -298,8 +403,8 @@ void stx_job_poll(void) {
   bool trackIncomplete = false;
   uint8_t buf[STX_SECTOR_SIZE];
   for (uint8_t s = 1; s <= job.geom.sectors; s++) {
-    stx_sector_result_t r;
-    if (stx_read_sector(cyl, side, s, buf, &r) != STX_OK) {
+    stx_tier_t tier;
+    if (stx_read_sector(cyl, side, s, buf, &tier) != STX_OK) {
       job_fail(STX_ERR_READ);
       return;
     }
@@ -309,13 +414,12 @@ void stx_job_poll(void) {
       job_fail(STX_ERR_READ);  // out of space / write error
       return;
     }
-    if (r == STX_SECTOR_STANDARD) {
-      job.sectors_standard++;
-    } else if (r == STX_SECTOR_MISSING) {
-      job.sectors_missing++;
-      trackIncomplete = true;
+    if (tier == STX_TIER_LOSSLESS) {
+      job.sectors_lossless++;
+    } else if (tier == STX_TIER_METADATA) {
+      job.sectors_metadata++;  // data recovered, only metadata lost
     } else {
-      job.sectors_nonstandard++;
+      job.sectors_dataloss++;
       trackIncomplete = true;
     }
   }
