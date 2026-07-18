@@ -19,6 +19,7 @@ This release makes downloading behave like a real web browser — following redi
 - The web UI now shows the SidecarTridge app icon in the browser tab.
 
 ### Fixes
+- Creating a blank ST image no longer forces the volume name to include an extension — any label of up to 11 characters now works (`GAMES`, `MYGAMES2024`, `DISK.001`).
 - A failed or redirected download no longer saves the error page or redirect stub to the microSD as if it were the file; failures now show a clear message.
 - Fixed a memory leak when importing files into a floppy image, memory leaks on failed downloads, and an incorrect total-size reading on large microSD cards.
 - Hardened the build and release pipeline so a failed build can no longer be published, and release artifacts are built in the intended mode.
