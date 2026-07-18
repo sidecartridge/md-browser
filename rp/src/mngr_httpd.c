@@ -9,6 +9,7 @@
 #include "mngr_httpd.h"
 #include "include/floppy.h"
 #include "include/stfs.h"
+#include "include/stx.h"
 #include "include/unzip.h"
 static char json_buff[MAX_JSON_PAYLOAD_SIZE] = {0};  // Buffer for JSON payload
 static int sdcard_status = SDCARD_INIT_ERROR;
@@ -1566,6 +1567,168 @@ static const char *cgi_unzip_cancel(int iIndex, int iNumParams, char *pcParam[],
   LWIP_UNUSED_ARG(pcValue);
   unzip_job_cancel();
   return json_unzip_status_response();
+}
+
+// ---- .STX -> .ST conversion (EPIC-08) -------------------------------------
+
+static const char *json_stx_status_response(void) {
+  stx_job_info_t info;
+  stx_job_get_info(&info);
+
+  unsigned percent = 0;
+  if (info.status == STX_JOB_COMPLETED) {
+    percent = 100;
+  } else if (info.tracks_total > 0) {
+    percent = (unsigned)((info.tracks_done * 100) / info.tracks_total);
+  }
+
+  size_t json_len = 0;
+  json_buff[0] = '\0';
+  if (!json_appendf(
+          json_buff, sizeof(json_buff), &json_len,
+          "{\"status\":\"%s\",\"percent\":%u,\"tracksTotal\":%d,"
+          "\"tracksDone\":%d,\"sectorsLossless\":%d,\"sectorsMetadata\":%d,"
+          "\"sectorsDataloss\":%d,\"incompleteTracks\":%d,"
+          "\"cancelRequested\":%s,\"errorCode\":%d,\"error\":",
+          stx_job_status_str(info.status), percent, info.tracks_total,
+          info.tracks_done, info.sectors_lossless, info.sectors_metadata,
+          info.sectors_dataloss, info.incomplete_tracks,
+          info.cancel_requested ? "true" : "false", (int)info.last_error) ||
+      !json_append_escaped_string(
+          json_buff, sizeof(json_buff), &json_len,
+          info.status == STX_JOB_FAILED ? stx_err_str(info.last_error) : "") ||
+      !json_appendf(json_buff, sizeof(json_buff), &json_len, "}")) {
+    strcpy(json_buff, "{\"error\":\"status too large\"}");
+  }
+  return "/json.shtml";
+}
+
+static const char *cgi_stx_preflight(int iIndex, int iNumParams,
+                                     char *pcParam[], char *pcValue[]) {
+  LWIP_UNUSED_ARG(iIndex);
+
+  // Preflight reuses the STX engine's single open slot; don't run it while a
+  // conversion is active.
+  if (stx_job_is_active()) {
+    strcpy(json_buff, "{\"error\":\"a conversion is already in progress\"}");
+    return "/json.shtml";
+  }
+
+  const char *src_folder = NULL, *src = NULL;
+  for (int i = 0; i < iNumParams; i++) {
+    if (strcmp(pcParam[i], "folder") == 0) src_folder = pcValue[i];
+    if (strcmp(pcParam[i], "name") == 0) src = pcValue[i];
+  }
+  if (!src_folder || !src) {
+    strcpy(json_buff, "{\"error\":\"missing parameters\"}");
+    return "/json.shtml";
+  }
+
+  char decoded_folder[MNGR_HTTPD_MAX_FOLDER_LEN];
+  char decoded_name[MNGR_HTTPD_MAX_NAME_LEN];
+  char folder_abs[MNGR_HTTPD_MAX_FOLDER_LEN];
+  char stx_path[MNGR_HTTPD_MAX_PATH_LEN];
+  if (!url_decode(src_folder, decoded_folder, MNGR_HTTPD_MAX_FOLDER_LEN) ||
+      !url_decode(src, decoded_name, MNGR_HTTPD_MAX_NAME_LEN) ||
+      !normalize_and_validate_path(decoded_folder, folder_abs,
+                                   MNGR_HTTPD_MAX_FOLDER_LEN) ||
+      !join_root_folder_name(folder_abs, decoded_name, stx_path,
+                             MNGR_HTTPD_MAX_PATH_LEN)) {
+    strcpy(json_buff, "{\"error\":\"invalid path\"}");
+    return "/json.shtml";
+  }
+
+  stx_preflight_t pf;
+  stx_err_t rc = stx_preflight(stx_path, &pf);
+  if (rc != STX_OK) {
+    snprintf(json_buff, sizeof(json_buff), "{\"error\":\"%s\"}",
+             stx_err_str(rc));
+    return "/json.shtml";
+  }
+  snprintf(json_buff, sizeof(json_buff),
+           "{\"verdict\":\"%s\",\"cylinders\":%u,\"sides\":%u,\"sectors\":%u,"
+           "\"totalSectors\":%d,\"lossless\":%d,\"metadata\":%d,"
+           "\"dataloss\":%d,\"standardGeometry\":%s}",
+           stx_verdict_str(pf.verdict), pf.geom.cylinders, pf.geom.sides,
+           pf.geom.sectors, pf.total_sectors, pf.lossless, pf.metadata,
+           pf.dataloss, pf.geom.standard_geometry ? "true" : "false");
+  return "/json.shtml";
+}
+
+static const char *cgi_stx_convert_start(int iIndex, int iNumParams,
+                                         char *pcParam[], char *pcValue[]) {
+  LWIP_UNUSED_ARG(iIndex);
+
+  if (copy_is_active() || unzip_job_is_active() || stx_job_is_active()) {
+    strcpy(json_buff, "{\"error\":\"a file operation is already in progress\"}");
+    return "/json.shtml";
+  }
+  if (download_job_active()) {
+    strcpy(json_buff, "{\"error\":\"a download is in progress\"}");
+    return "/json.shtml";
+  }
+
+  const char *src_folder = NULL, *src = NULL;
+  for (int i = 0; i < iNumParams; i++) {
+    if (strcmp(pcParam[i], "folder") == 0) src_folder = pcValue[i];
+    if (strcmp(pcParam[i], "name") == 0) src = pcValue[i];
+  }
+  if (!src_folder || !src) {
+    strcpy(json_buff, "{\"error\":\"missing parameters\"}");
+    return "/json.shtml";
+  }
+
+  char decoded_folder[MNGR_HTTPD_MAX_FOLDER_LEN];
+  char decoded_name[MNGR_HTTPD_MAX_NAME_LEN];
+  char folder_abs[MNGR_HTTPD_MAX_FOLDER_LEN];
+  char stx_path[MNGR_HTTPD_MAX_PATH_LEN];
+  if (!url_decode(src_folder, decoded_folder, MNGR_HTTPD_MAX_FOLDER_LEN) ||
+      !url_decode(src, decoded_name, MNGR_HTTPD_MAX_NAME_LEN) ||
+      !normalize_and_validate_path(decoded_folder, folder_abs,
+                                   MNGR_HTTPD_MAX_FOLDER_LEN)) {
+    strcpy(json_buff, "{\"error\":\"invalid path encoding\"}");
+    return "/json.shtml";
+  }
+  if (!join_root_folder_name(folder_abs, decoded_name, stx_path,
+                             MNGR_HTTPD_MAX_PATH_LEN)) {
+    strcpy(json_buff, "{\"error\":\"invalid archive path\"}");
+    return "/json.shtml";
+  }
+
+  FILINFO fno;
+  if (f_stat(stx_path, &fno) != FR_OK || (fno.fattrib & AM_DIR)) {
+    strcpy(json_buff, "{\"error\":\"file not found\"}");
+    return "/json.shtml";
+  }
+
+  // Output .st goes into the same folder as the source (extract-here).
+  if (!stx_job_start(stx_path, folder_abs)) {
+    stx_job_info_t info;
+    stx_job_get_info(&info);
+    snprintf(json_buff, sizeof(json_buff), "{\"error\":\"%s\"}",
+             stx_err_str(info.last_error));
+    return "/json.shtml";
+  }
+  return json_stx_status_response();
+}
+
+static const char *cgi_stx_convert_status(int iIndex, int iNumParams,
+                                          char *pcParam[], char *pcValue[]) {
+  LWIP_UNUSED_ARG(iIndex);
+  LWIP_UNUSED_ARG(iNumParams);
+  LWIP_UNUSED_ARG(pcParam);
+  LWIP_UNUSED_ARG(pcValue);
+  return json_stx_status_response();
+}
+
+static const char *cgi_stx_convert_cancel(int iIndex, int iNumParams,
+                                          char *pcParam[], char *pcValue[]) {
+  LWIP_UNUSED_ARG(iIndex);
+  LWIP_UNUSED_ARG(iNumParams);
+  LWIP_UNUSED_ARG(pcParam);
+  LWIP_UNUSED_ARG(pcValue);
+  stx_job_cancel();
+  return json_stx_status_response();
 }
 
 // CGI: create blank Atari ST disk image
@@ -3287,6 +3450,10 @@ static const tCGI cgi_handlers[] = {
     {"/unzip_start.cgi", cgi_unzip_start},
     {"/unzip_status.cgi", cgi_unzip_status},
     {"/unzip_cancel.cgi", cgi_unzip_cancel},
+    {"/stx_preflight.cgi", cgi_stx_preflight},
+    {"/stx_convert_start.cgi", cgi_stx_convert_start},
+    {"/stx_convert_status.cgi", cgi_stx_convert_status},
+    {"/stx_convert_cancel.cgi", cgi_stx_convert_cancel},
     {"/booster.cgi", cgi_booster},
     {"/mkst.cgi", cgi_mkst},
     {"/floppy_convert.cgi", cgi_floppy_convert},

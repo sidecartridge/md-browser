@@ -169,6 +169,7 @@ target_sources(${PROJECT_NAME} PRIVATE
         select.c
         floppy.c
         stfs.c
+        stx.c
         unzip.c
         usb_descriptors.c
         usb_mass.c

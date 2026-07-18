@@ -9,6 +9,7 @@
 #include "mngr.h"
 
 #include "copy.h"
+#include "include/stx.h"
 #include "include/unzip.h"
 
 static bool startBooster =
@@ -371,7 +372,7 @@ int mngr_init() {
     int wait_ms = 10;
     if (download_getStatus() == DOWNLOAD_STATUS_STARTED ||
         download_getStatus() == DOWNLOAD_STATUS_IN_PROGRESS ||
-        copy_is_active() || unzip_job_is_active()) {
+        copy_is_active() || unzip_job_is_active() || stx_job_is_active()) {
       wait_ms = 1;
     }
 #if PICO_CYW43_ARCH_POLL
@@ -470,6 +471,10 @@ int mngr_init() {
 
     if (unzip_job_is_active()) {
       unzip_job_poll();
+    }
+
+    if (stx_job_is_active()) {
+      stx_job_poll();
     }
   }
 

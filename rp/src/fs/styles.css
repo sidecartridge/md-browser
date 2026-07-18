@@ -1606,3 +1606,13 @@ th.sorted {
   visibility: visible;
   opacity: 1;
 }
+
+/* STX->ST preflight verdict badge */
+.stx-verdict { display: flex; align-items: center; gap: 8px; font-weight: 700; font-size: 1.05em; margin: 8px 0; }
+.stx-verdict-dot { width: 12px; height: 12px; border-radius: 50%; display: inline-block; }
+.stx-verdict-green { color: #2e7d32; }
+.stx-verdict-green .stx-verdict-dot { background: #2e7d32; }
+.stx-verdict-yellow { color: #b8860b; }
+.stx-verdict-yellow .stx-verdict-dot { background: #f0ad4e; }
+.stx-verdict-red { color: #c62828; }
+.stx-verdict-red .stx-verdict-dot { background: #c62828; }
