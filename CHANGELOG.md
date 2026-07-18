@@ -1,11 +1,27 @@
 # Changelog
 
-## v2.1.0 (in development)
+## v2.1.0 (2026-07-18) - Downloads, archives & disk tools
 
-Development cycle in progress. Planned: HTTP redirect support for downloads, HTTPS downloads, build/CI hardening, and performance/robustness fixes across the file-transfer paths.
+This release makes downloading behave like a real web browser — following redirects, supporting HTTPS, and naming files correctly — and adds new disk tools to the File Manager: extract `.zip` archives, convert `.STX` (Pasti) images to `.st`, and a paste-to-download shortcut.
+
+### New features
+- Extract `.zip` archives from the File Manager: pick a `.zip`, choose **Extract**, and its contents are unpacked into the current folder with a live progress display.
+- Convert `.STX` (Pasti) disk images to `.st`. Before converting, a colour-coded preflight tells you what to expect — **LOSSLESS** (a perfect copy), **ACCEPTABLE** (all data kept, only copy-protection metadata lost), or **CAREFUL** (some sectors can't be recovered) — so you decide with the outcome known.
+- HTTPS downloads: the File & Download Manager can now download from `https://` URLs, not just `http://`.
+- Download links that redirect (301/302/303/307/308) are now followed automatically, including `http`-to-`https` redirects.
+- Paste a link: copy an `http`/`https` URL and paste it anywhere in the File Manager to open **Upload from URL** already filled in — just click Start Download.
 
 ### Changes
-- Started the v2.1.0 development cycle.
+- Downloaded files are named the way a browser would name them (using the server's `Content-Disposition` header, otherwise the final URL after redirects).
+- Download URLs may now include an explicit port (e.g. `http://host:8080/file`).
+- After a download finishes, the file list refreshes on its own — the new file appears without reloading the page.
+- Clearer, consistent action icons throughout the File Manager.
+- The web UI now shows the SidecarTridge app icon in the browser tab.
+
+### Fixes
+- A failed or redirected download no longer saves the error page or redirect stub to the microSD as if it were the file; failures now show a clear message.
+- Fixed a memory leak when importing files into a floppy image, memory leaks on failed downloads, and an incorrect total-size reading on large microSD cards.
+- Hardened the build and release pipeline so a failed build can no longer be published, and release artifacts are built in the intended mode.
 
 ---
 
