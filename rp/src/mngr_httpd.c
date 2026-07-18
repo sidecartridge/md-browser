@@ -546,7 +546,7 @@ static const st_disk_geometry_t *find_st_disk_geometry(const char *id) {
 
 static bool is_tos_label_char(char ch) {
   return ((ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || ch == '_' ||
-          ch == '-');
+          ch == '-' || ch == '.');
 }
 
 static bool normalize_st_volume_label(const char *input, char *label11,
@@ -557,40 +557,22 @@ static bool normalize_st_volume_label(const char *input, char *label11,
   label11[11] = '\0';
   *has_label = false;
 
+  // A GEMDOS/FAT volume label is a literal 11-byte directory name field, not an
+  // 8.3 name: it has no "extension". Accept up to 11 permitted characters,
+  // uppercase them, and leave the field left-justified and space-padded.
   const char *src = input ? input : "";
-  char cleaned[16] = {0};
-  size_t cleaned_len = 0;
-  bool dot_seen = false;
+  size_t len = 0;
 
-  for (; *src != '\0' && cleaned_len < sizeof(cleaned) - 1; src++) {
+  for (; *src != '\0'; src++) {
     unsigned char ch = (unsigned char)*src;
     if (isspace(ch)) continue;
     if (ch >= 'a' && ch <= 'z') ch = (unsigned char)(ch - 'a' + 'A');
-
-    if (ch == '.') {
-      if (dot_seen || cleaned_len == 0) return false;
-      dot_seen = true;
-      cleaned[cleaned_len++] = '.';
-      continue;
-    }
-
     if (!is_tos_label_char((char)ch)) return false;
-    cleaned[cleaned_len++] = (char)ch;
+    if (len >= 11) return false;
+    label11[len++] = (char)ch;
   }
-  cleaned[cleaned_len] = '\0';
 
-  if (cleaned_len == 0) return true;
-
-  char *dot = strchr(cleaned, '.');
-  if (!dot || strchr(dot + 1, '.') != NULL || dot[1] == '\0') return false;
-
-  size_t base_len = dot ? (size_t)(dot - cleaned) : strlen(cleaned);
-  size_t ext_len = dot ? strlen(dot + 1) : 0;
-  if (base_len == 0 || base_len > 8 || ext_len > 3) return false;
-
-  memcpy(label11, cleaned, base_len);
-  if (ext_len > 0) memcpy(label11 + 8, dot + 1, ext_len);
-  *has_label = true;
+  *has_label = (len > 0);
   return true;
 }
 
@@ -1814,8 +1796,8 @@ static const char *cgi_mkst(int iIndex, int iNumParams, char *pcParam[],
                                  &has_volume_label)) {
     strcpy(
         json_buff,
-        "{\"error\":\"invalid volume name: leave empty or use 8.3 format "
-        "like DISK.001\"}");
+        "{\"error\":\"invalid volume name: leave empty or use up to 11 "
+        "characters (A-Z, 0-9, _, -, .)\"}");
     goto cleanup;
   }
   if (!normalize_st_file_stem(decoded_name, stem, MNGR_HTTPD_MAX_NAME_LEN)) {
