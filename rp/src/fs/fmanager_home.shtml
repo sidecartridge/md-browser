@@ -2075,7 +2075,7 @@
         <button class="pure-button" x-show="!imageMode && canConvertFileItem(detailFile)" @click="openConvertDialog(detailFile)"><i class="fas fa-retweet"></i> <span x-text="convertActionLabelForName(detailFile.n)"></span></button>
         <button class="pure-button" x-show="!imageMode" @click="openCopyDialog(detailFile, $event)"><i class="fas fa-copy"></i> Copy</button>
         <button class="pure-button" x-show="!imageMode && canExtractItem(detailFile)" @click="openUnzipDialog(detailFile)"><i class="fas fa-box-open"></i> Extract</button>
-        <button class="pure-button" x-show="!imageMode && canConvertStxItem(detailFile)" @click="openStxDialog(detailFile)"><i class="fas fa-retweet"></i> Convert to .st</button>
+        <button class="pure-button" x-show="!imageMode && canConvertStxItem(detailFile)" @click="openStxDialog(detailFile)"><i class="fas fa-retweet"></i> Convert to .st <span class="badge-experimental">Experimental</span></button>
         <button class="pure-button" x-show="imageMode" @click="openImageCopyDialog(detailFile, $event)"><i class="fas fa-file-export"></i> Copy to SD</button>
         <button class="pure-button" x-show="!imageMode" @click="openMoveDialog(detailFile)"><i class="fas fa-arrow-right"></i> Move</button>
         <button class="pure-button pure-button-primary" x-show="!imageMode || canRenameImageItem(detailFile)" @click="renameFile()"><i class="fas fa-pen-to-square"></i> Rename</button>
@@ -2199,7 +2199,8 @@
   <div x-show="stxVisible" x-cloak class="modal">
     <div class="modal-overlay" @click="closeStxDialog()"></div>
     <div class="modal-content">
-      <h3>Convert STX to ST</h3>
+      <h3>Convert STX to ST <span class="badge-experimental">Experimental</span></h3>
+      <p class="stx-experimental-note"><i class="fas fa-flask"></i> Experimental — results may vary; copy-protected images can lose data.</p>
       <p><strong>Source:</strong> <code x-text="stxSourceName"></code></p>
       <p><strong>Creates:</strong> <code x-text="stxTargetName()"></code> in the current folder</p>
       <!-- Phase 1: analyzing -->
