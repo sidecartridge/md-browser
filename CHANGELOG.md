@@ -10,6 +10,7 @@ This release makes downloading behave like a real web browser — following redi
 - HTTPS downloads: the File & Download Manager can now download from `https://` URLs, not just `http://`.
 - Download links that redirect (301/302/303/307/308) are now followed automatically, including `http`-to-`https` redirects.
 - Paste a link: copy an `http`/`https` URL and paste it anywhere in the File Manager to open **Upload from URL** already filled in — just click Start Download.
+- Browse A–Z: browse the Floppy Database by first letter or number (plus a **New** group for recent arrivals) and download straight to the microSD card, alongside the existing Search by title.
 
 ### Changes
 - Downloaded files are named the way a browser would name them (using the server's `Content-Disposition` header, otherwise the final URL after redirects).
