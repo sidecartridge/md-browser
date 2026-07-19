@@ -256,19 +256,7 @@ int mngr_init() {
     return err;
   }
 
-  // Initialize the SD card
-  FATFS fs;
-  int sdcard_err = sdcard_initFilesystem(&fs, "");
-  if (sdcard_err != SDCARD_INIT_OK) {
-    DPRINTF("Error initializing the SD card: %i\n", sdcard_err);
-  } else {
-    DPRINTF("SD card found & initialized\n");
-  }
-
-  // Deinit the network
-  DPRINTF("Deinitializing the network\n");
-  network_deInit();
-
+  // Compute the display strings first (from flash config only — no SD needed).
   // Set hostname
   SettingsConfigEntry *hostname_entry =
       settings_find_entry(gconfig_getContext(), PARAM_HOSTNAME);
@@ -297,7 +285,35 @@ int mngr_init() {
     snprintf(ssid, sizeof(ssid), "%s", ssid_param->value);
   }
 
+  // Show the boot screen BEFORE probing the SD card, so the device always
+  // reaches the display even if the SD probe stalls with no card inserted.
   display_mngr_start(ssid, url_host, url_ip);
+
+  // Initialize the SD card. Detailed logging in sdcard.c pinpoints a stall if
+  // one happens with no card inserted.
+  FATFS fs;
+  int sdcard_err = sdcard_initFilesystem(&fs, "");
+  if (sdcard_err != SDCARD_INIT_OK) {
+    DPRINTF("Error initializing the SD card: %i\n", sdcard_err);
+    // No usable card: tell the user on screen and wait for a power-cycle. The
+    // card is only probed at boot, so a newly inserted card needs a power
+    // off/on. Keep SELECT active for reset / factory-erase in the meantime.
+    display_mngr_no_sdcard();
+    display_refresh();
+    DPRINTF("Deinitializing the network\n");
+    network_deInit();
+    select_coreWaitPush(reset_device, reset_deviceAndEraseFlash);
+    SEND_COMMAND_TO_DISPLAY(DISPLAY_COMMAND_NOP);
+    DPRINTF("No microSD card. Halting until a card is inserted + power-cycle.\n");
+    while (1) {
+      sleep_ms(500);
+    }
+  }
+  DPRINTF("SD card found & initialized\n");
+
+  // Deinit the network
+  DPRINTF("Deinitializing the network\n");
+  network_deInit();
 
   wifi_mode_t wifi_mode_value = WIFI_MODE_STA;
   err = network_wifiInit(wifi_mode_value);

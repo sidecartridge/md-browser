@@ -39,6 +39,7 @@
 #endif
 
 void display_mngr_start(const char *ssid, const char *url1, const char *url2);
+void display_mngr_no_sdcard(void);
 void display_mngr_wifi_change_status(uint8_t wifi_status, const char *url1,
                                      const char *url2, const char *details);
 void display_mngr_change_status(uint8_t status, const char *details);

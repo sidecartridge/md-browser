@@ -161,3 +161,39 @@ void display_mngr_start(const char *ssid, const char *url1, const char *url2) {
 
   DPRINTF("Exiting fabric display\n");
 }
+
+// Dedicated screen shown when no microSD card is detected at boot. The card is
+// only probed at startup, so the user must insert one and power-cycle.
+void display_mngr_no_sdcard(void) {
+  u8g2_ClearBuffer(display_getU8g2Ref());
+
+  u8g2_SetFont(display_getU8g2Ref(), u8g2_font_amstrad_cpc_extended_8f);
+
+  // Inverted title bar
+  u8g2_DrawBox(display_getU8g2Ref(), 0, 0, DISPLAY_WIDTH, 8);
+  u8g2_SetDrawColor(display_getU8g2Ref(), 0);
+  char title_str[40] = {0};
+  snprintf(title_str, sizeof(title_str), "%s - %s", BROWSER_TITLE,
+           RELEASE_VERSION);
+  u8g2_DrawStr(display_getU8g2Ref(),
+               LEFT_PADDING_FOR_CENTER(title_str, DISPLAY_TILES_WIDTH) * 8, 8,
+               title_str);
+  u8g2_SetDrawColor(display_getU8g2Ref(), 1);
+
+  // Message
+  const char *line1 = "NO microSD CARD DETECTED";
+  const char *line2 = "Insert a microSD card and then";
+  const char *line3 = "power the device OFF and ON.";
+  u8g2_DrawStr(display_getU8g2Ref(),
+               LEFT_PADDING_FOR_CENTER(line1, DISPLAY_TILES_WIDTH) * 8, 70,
+               line1);
+  u8g2_DrawStr(display_getU8g2Ref(),
+               LEFT_PADDING_FOR_CENTER(line2, DISPLAY_TILES_WIDTH) * 8, 100,
+               line2);
+  u8g2_DrawStr(display_getU8g2Ref(),
+               LEFT_PADDING_FOR_CENTER(line3, DISPLAY_TILES_WIDTH) * 8, 118,
+               line3);
+
+  // Product info
+  display_drawProductInfo();
+}
