@@ -1620,6 +1620,29 @@ th.sorted {
 /* Consistent spacing for leading action-button icons (EPIC-09) */
 .pure-button > i.fas { margin-right: 0.4em; }
 
+/* ---------- "Experimental" marker for STX->ST (EPIC-11) ---------- */
+.badge-experimental {
+  display: inline-block;
+  margin-left: 0.4em;
+  padding: 0.05em 0.5em;
+  border: 1px solid #fcd34d;
+  border-radius: 999px;
+  background: #fef3c7;
+  color: #854d0e;
+  font-size: 0.72em;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  vertical-align: middle;
+}
+.stx-experimental-note {
+  color: #854d0e;
+  font-size: 0.9rem;
+}
+.stx-experimental-note > i.fas {
+  margin-right: 0.35em;
+}
+
 /* ---------- Browse mode: mode toggle, A–Z index, pager (EPIC-10) ---------- */
 .mode-toggle {
   display: inline-flex;
