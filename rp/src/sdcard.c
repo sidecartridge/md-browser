@@ -3,7 +3,9 @@
 static sdcard_status_t sdcardInit() {
   DPRINTF("Initializing SD card...\n");
   // Initialize the SD card
+  DPRINTF("Calling sd_init_driver()...\n");
   bool success = sd_init_driver();
+  DPRINTF("sd_init_driver() returned: %d\n", success);
   if (!success) {
     DPRINTF("ERROR: Could not initialize SD card\r\n");
     return SDCARD_INIT_ERROR;
@@ -16,7 +18,9 @@ static sdcard_status_t sdcardInit() {
 
 FRESULT sdcard_mountFilesystem(FATFS *fsys, const char *drive) {
   // Mount the drive
+  DPRINTF("Calling f_mount() (immediate mount) on drive '%s'...\n", drive);
   FRESULT fres = f_mount(fsys, drive, 1);
+  DPRINTF("f_mount() returned: %d\n", fres);
   if (fres != FR_OK) {
     DPRINTF("ERROR: Could not mount the filesystem. Error code: %d\n", fres);
   } else {
