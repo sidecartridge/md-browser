@@ -318,6 +318,15 @@ endif()
 # Pass the _DEBUG flag to the C compiler
 add_definitions(-D_DEBUG=${_DEBUG})
 
+# The vendored fatfs-sdk ships development asserts (myASSERT) that are noreturn.
+# With no microSD card the SPI probe leaves the RX FIFO non-empty and trips
+# chk_spi() in my_spi.c, halting startup until a power-cycle (the "app won't start
+# without a card" bug). Build with NDEBUG so those dev asserts compile out and a
+# missing card fails gracefully (SD init returns an error and the app shows a
+# "no card" screen). The app itself uses no runtime asserts, and DPRINTF logging
+# is gated on _DEBUG (not NDEBUG), so debug builds still log.
+target_compile_definitions(${PROJECT_NAME} PRIVATE NDEBUG)
+
 # Device/Computer type
 add_definitions(-DDISPLAY_ATARIST)
 
