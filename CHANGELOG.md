@@ -6,7 +6,7 @@ This release makes downloading behave like a real web browser — following redi
 
 ### New features
 - Extract `.zip` archives from the File Manager: pick a `.zip`, choose **Extract**, and its contents are unpacked into the current folder with a live progress display.
-- Convert `.STX` (Pasti) disk images to `.st`. Before converting, a colour-coded preflight tells you what to expect — **LOSSLESS** (a perfect copy), **ACCEPTABLE** (all data kept, only copy-protection metadata lost), or **CAREFUL** (some sectors can't be recovered) — so you decide with the outcome known.
+- Convert `.STX` (Pasti) disk images to `.st` (**experimental**). Before converting, a colour-coded preflight tells you what to expect — **LOSSLESS** (a perfect copy), **ACCEPTABLE** (all data kept, only copy-protection metadata lost), or **CAREFUL** (some sectors can't be recovered) — so you decide with the outcome known.
 - HTTPS downloads: the File & Download Manager can now download from `https://` URLs, not just `http://`.
 - Download links that redirect (301/302/303/307/308) are now followed automatically, including `http`-to-`https` redirects.
 - Paste a link: copy an `http`/`https` URL and paste it anywhere in the File Manager to open **Upload from URL** already filled in — just click Start Download.
@@ -20,6 +20,7 @@ This release makes downloading behave like a real web browser — following redi
 - The web UI now shows the SidecarTridge app icon in the browser tab.
 
 ### Fixes
+- With no microSD card inserted, the app now starts and shows a clear on-screen message ("No microSD card — insert one and power off/on") instead of failing to start.
 - Creating a blank ST image no longer forces the volume name to include an extension — any label of up to 11 characters now works (`GAMES`, `MYGAMES2024`, `DISK.001`).
 - A failed or redirected download no longer saves the error page or redirect stub to the microSD as if it were the file; failures now show a clear message.
 - Fixed a memory leak when importing files into a floppy image, memory leaks on failed downloads, and an incorrect total-size reading on large microSD cards.
