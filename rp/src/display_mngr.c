@@ -194,6 +194,14 @@ void display_mngr_no_sdcard(void) {
                LEFT_PADDING_FOR_CENTER(line3, DISPLAY_TILES_WIDTH) * 8, 118,
                line3);
 
+  // ESC / GEMDOS instruction line (condensed font, just above the product info)
+  u8g2_SetFont(display_getU8g2Ref(), u8g2_font_squeezed_b7_tr);
+  u8g2_DrawStr(
+      display_getU8g2Ref(),
+      LEFT_PADDING_FOR_CENTER(DISPLAY_MANAGER_BYPASS_MESSAGE, 68) *
+          DISPLAY_NARROW_CHAR_WIDTH,
+      DISPLAY_HEIGHT - 9, DISPLAY_MANAGER_BYPASS_MESSAGE);
+
   // Product info
   display_drawProductInfo();
 }

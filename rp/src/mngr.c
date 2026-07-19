@@ -295,18 +295,35 @@ int mngr_init() {
   int sdcard_err = sdcard_initFilesystem(&fs, "");
   if (sdcard_err != SDCARD_INIT_OK) {
     DPRINTF("Error initializing the SD card: %i\n", sdcard_err);
-    // No usable card: tell the user on screen and wait for a power-cycle. The
-    // card is only probed at boot, so a newly inserted card needs a power
-    // off/on. Keep SELECT active for reset / factory-erase in the meantime.
+    // No usable card: tell the user on screen. The card is only probed at boot,
+    // so a newly inserted card needs a power off/on. ESC still returns to
+    // Booster and any other key boots GEMDOS (handled Atari-side); SELECT stays
+    // active for reset / factory-erase.
     display_mngr_no_sdcard();
     display_refresh();
     DPRINTF("Deinitializing the network\n");
     network_deInit();
+    // Bring up the shared-memory tokens so the ESC -> Booster command validates,
+    // then process protocol commands so ESC (APP_BOOSTER_START) is handled.
+    mngr_preinit();
     select_coreWaitPush(reset_device, reset_deviceAndEraseFlash);
     SEND_COMMAND_TO_DISPLAY(DISPLAY_COMMAND_NOP);
-    DPRINTF("No microSD card. Halting until a card is inserted + power-cycle.\n");
+    DPRINTF("No microSD card. ESC=Booster, other key=GEMDOS, or power-cycle.\n");
+    while (!startBooster) {
+      mngr_loop();
+      sleep_ms(10);
+    }
+    // ESC pressed: reset the Atari and jump to Booster (mirror the main loop).
+    select_setResetCallback(NULL);
+    select_setLongResetCallback(NULL);
+    select_coreWaitPushDisable();
+    sleep_ms(1000);
+    SEND_COMMAND_TO_DISPLAY(DISPLAY_COMMAND_RESET);
+    sleep_ms(1000);
+    DPRINTF("Jumping to the booster app...\n");
+    reset_jump_to_booster();
     while (1) {
-      sleep_ms(500);
+      sleep_ms(1000);
     }
   }
   DPRINTF("SD card found & initialized\n");
