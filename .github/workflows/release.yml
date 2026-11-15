@@ -40,7 +40,7 @@ jobs:
       # "stcmd: command not found" (v2.1.1 release, run 30564106865).
       run: |
         set -o pipefail
-        curl -sSLf https://github.com/sidecartridge/atarist-toolkit-docker/releases/download/v1.3.0/install_atarist_toolkit_docker.sh | bash
+        curl -sSLf https://github.com/sidecartridge/atarist-toolkit-docker/releases/download/v1.5.0/install_atarist_toolkit_docker.sh | bash
 
     - name: Install dependencies
       run: |
